@@ -21,6 +21,8 @@ k3s on one server (16 GB RAM, 4 Intel i5 cores)
   └─ Existing Argo CD and monitoring
 ```
 
+The application backend is planned in Python with FastAPI; the frontend is React and TypeScript. The first frontend slice has upload and product-review screens, but receipt upload, account sign-in, and review actions still require API implementation.
+
 The app supports separate user accounts. Receipts are private to the account that uploaded them; the API must enforce ownership on every read and write. Google sign-in with invite-only access remains the proposed initial identity approach. PostgreSQL is hosted externally as a SaaS; it is not deployed on the k3s server.
 
 ## Receipt ingestion and processing
