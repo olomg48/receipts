@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Account, apiRequest, ReceiptSummary } from "./api";
 import {
   ArrowDownToLine,
   ArrowRight,
@@ -21,14 +22,23 @@ import {
 
 type View = "receipts" | "products";
 type ApiStatus = "checking" | "available" | "unavailable";
+type AuthStatus = "checking" | "signed-in" | "signed-out";
 
 function App() {
   const [view, setView] = useState<View>("receipts");
   const [apiStatus, setApiStatus] = useState<ApiStatus>("checking");
+  const [authStatus, setAuthStatus] = useState<AuthStatus>("checking");
+  const [account, setAccount] = useState<Account | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [receipts, setReceipts] = useState<ReceiptSummary[]>([]);
+  const [receiptError, setReceiptError] = useState<string | null>(null);
+  const [isLoadingReceipts, setIsLoadingReceipts] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [retailerCode, setRetailerCode] = useState("biedronka");
   const [search, setSearch] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const hasLoadedReceipts = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -48,6 +58,20 @@ function App() {
       })
       .finally(() => window.clearTimeout(timeoutId));
 
+    apiRequest<Account>("/auth/me")
+      .then((value) => {
+        if (active) {
+          setAccount(value);
+          setAuthStatus("signed-in");
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setAccount(null);
+          setAuthStatus("signed-out");
+        }
+      });
+
     return () => {
       active = false;
       window.clearTimeout(timeoutId);
@@ -55,15 +79,64 @@ function App() {
     };
   }, []);
 
+  const hasActiveReceipts = receipts.some(
+    (receipt) => receipt.status === "queued" || receipt.status === "processing",
+  );
+
+  useEffect(() => {
+    if (authStatus !== "signed-in") {
+      setReceipts([]);
+      hasLoadedReceipts.current = false;
+      return;
+    }
+
+    let active = true;
+    const refresh = () => {
+      if (!hasLoadedReceipts.current) {
+        setIsLoadingReceipts(true);
+      }
+      apiRequest<ReceiptSummary[]>("/receipts")
+        .then((value) => {
+          if (active) {
+            setReceipts(value);
+            setReceiptError(null);
+            hasLoadedReceipts.current = true;
+          }
+        })
+        .catch((error: unknown) => {
+          if (active) {
+            setReceiptError(error instanceof Error ? error.message : "Could not load receipts.");
+          }
+        })
+        .finally(() => {
+          if (active) {
+            setIsLoadingReceipts(false);
+          }
+        });
+    };
+    refresh();
+    const intervalId = hasActiveReceipts ? window.setInterval(refresh, 5000) : undefined;
+
+    return () => {
+      active = false;
+      if (intervalId !== undefined) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [authStatus, hasActiveReceipts]);
+
   function chooseFile(file?: File) {
     if (!file) {
       return;
     }
 
-    const supported = ["application/pdf", "image/png"].includes(file.type);
+    const supportedExtension = retailerCode === "biedronka" ? ".pdf" : ".png";
+    const supported = file.name.toLowerCase().endsWith(supportedExtension);
     if (!supported) {
       setSelectedFile(null);
-      setFileError("Choose a PDF or PNG receipt.");
+      setFileError(retailerCode === "biedronka"
+        ? "Choose a Biedronka PDF receipt."
+        : "Choose a Lidl PNG receipt.");
       return;
     }
     if (file.size > 10 * 1024 * 1024) {
@@ -74,6 +147,44 @@ function App() {
 
     setSelectedFile(file);
     setFileError(null);
+  }
+
+  async function uploadReceipt() {
+    if (!selectedFile) {
+      return;
+    }
+    setIsUploading(true);
+    setFileError(null);
+    const formData = new FormData();
+    formData.set("file", selectedFile);
+    formData.set("retailer_code", retailerCode);
+    try {
+      await apiRequest<{ id: string; status: string }>("/receipts", {
+        method: "POST",
+        body: formData,
+      });
+      setSelectedFile(null);
+      setIsLoadingReceipts(true);
+      const updatedReceipts = await apiRequest<ReceiptSummary[]>("/receipts");
+      setReceipts(updatedReceipts);
+    } catch (error) {
+      setFileError(error instanceof Error ? error.message : "Receipt upload failed.");
+    } finally {
+      setIsUploading(false);
+      setIsLoadingReceipts(false);
+    }
+  }
+
+  async function signOut() {
+    try {
+      await apiRequest<{ status: string }>("/auth/logout", { method: "POST" });
+    } catch (error) {
+      setReceiptError(error instanceof Error ? error.message : "Sign-out failed.");
+    } finally {
+      setAccount(null);
+      setAuthStatus("signed-out");
+      hasLoadedReceipts.current = false;
+    }
   }
 
   const isProducts = view === "products";
@@ -152,7 +263,10 @@ function App() {
               {apiStatus === "checking" ? "Checking API" : apiStatus === "available" ? "API connected" : "API not connected"}
             </div>
             <button className="help-button" type="button" aria-label="Help"><CircleHelp size={18} /></button>
-            <span className="top-avatar">U</span>
+            {authStatus === "signed-in" && (
+              <button className="sign-out-button" type="button" onClick={signOut}>Sign out</button>
+            )}
+            <span className="top-avatar">{account?.display_name?.[0]?.toUpperCase() ?? "U"}</span>
           </div>
         </header>
 
@@ -169,6 +283,19 @@ function App() {
                 setSelectedFile(null);
                 setFileError(null);
               }}
+              retailerCode={retailerCode}
+              onRetailerChange={(value) => {
+                setRetailerCode(value);
+                setSelectedFile(null);
+                setFileError(null);
+              }}
+              onUpload={uploadReceipt}
+              isUploading={isUploading}
+              receipts={receipts}
+              isLoadingReceipts={isLoadingReceipts}
+              receiptError={receiptError}
+              authStatus={authStatus}
+              account={account}
               apiStatus={apiStatus}
             />
           )}
@@ -184,10 +311,44 @@ type ReceiptsProps = {
   fileInput: React.RefObject<HTMLInputElement>;
   onChooseFile: (file?: File) => void;
   onClearFile: () => void;
+  retailerCode: string;
+  onRetailerChange: (value: string) => void;
+  onUpload: () => void;
+  isUploading: boolean;
+  receipts: ReceiptSummary[];
+  isLoadingReceipts: boolean;
+  receiptError: string | null;
+  authStatus: AuthStatus;
+  account: Account | null;
   apiStatus: ApiStatus;
 };
 
-function Receipts({ file, fileError, fileInput, onChooseFile, onClearFile, apiStatus }: ReceiptsProps) {
+function Receipts({
+  file,
+  fileError,
+  fileInput,
+  onChooseFile,
+  onClearFile,
+  retailerCode,
+  onRetailerChange,
+  onUpload,
+  isUploading,
+  receipts,
+  isLoadingReceipts,
+  receiptError,
+  authStatus,
+  account,
+  apiStatus,
+}: ReceiptsProps) {
+  const totalSpent = receipts.reduce(
+    (total, receipt) => total + (receipt.total_paid ? Number(receipt.total_paid) : 0),
+    0,
+  );
+  const totalDiscounts = receipts.reduce(
+    (total, receipt) => total + Number(receipt.discount_total || 0),
+    0,
+  );
+
   return (
     <>
       <div className="page-heading">
@@ -200,9 +361,9 @@ function Receipts({ file, fileError, fileInput, onChooseFile, onClearFile, apiSt
       </div>
 
       <div className="stats-row">
-        <StatCard label="RECEIPTS ADDED" value="—" detail="No receipts yet" icon={<ReceiptText size={17} />} />
-        <StatCard label="TOTAL SPENT" value="—" detail="Appears after your first upload" icon={<ArrowDownToLine size={17} />} />
-        <StatCard label="PRODUCTS TRACKED" value="—" detail="Codes from your receipts" icon={<PackageCheck size={17} />} />
+        <StatCard label="RECEIPTS ADDED" value={String(receipts.length)} detail="In your account" icon={<ReceiptText size={17} />} />
+        <StatCard label="TOTAL SPENT" value={`${totalSpent.toFixed(2)} PLN`} detail="From processed receipts" icon={<ArrowDownToLine size={17} />} />
+        <StatCard label="DISCOUNTS FOUND" value={`${totalDiscounts.toFixed(2)} PLN`} detail="From processed receipts" icon={<PackageCheck size={17} />} />
       </div>
 
       <div className="section-title-row">
@@ -231,19 +392,48 @@ function Receipts({ file, fileError, fileInput, onChooseFile, onClearFile, apiSt
         <div className="upload-copy">
           <span className="step-label">01 <span>·</span> ADD A RECEIPT</span>
           <h3>Drop your receipt here</h3>
-          <p>Start with a Biedronka PDF or a Lidl PNG. Account sign-in will be added before uploads are enabled.</p>
+          <p>Upload a Biedronka PDF or a Lidl PNG. Processing runs securely in the background.</p>
+          <label className="retailer-select">
+            Store
+            <select
+              value={retailerCode}
+              onChange={(event) => onRetailerChange(event.target.value)}
+              disabled={isUploading}
+            >
+              <option value="biedronka">Biedronka · PDF</option>
+              <option value="lidl">Lidl · PNG</option>
+            </select>
+          </label>
           <input
             ref={fileInput}
             className="visually-hidden"
             type="file"
-            accept=".pdf,.png,application/pdf,image/png"
+            accept={retailerCode === "biedronka" ? ".pdf,application/pdf" : ".png,image/png"}
             onChange={(event) => onChooseFile(event.target.files?.[0])}
           />
-          <button className="primary-button" type="button" onClick={() => fileInput.current?.click()}>
-            <Upload size={16} /> Choose a file
-          </button>
-          <span className="file-hint"><ShieldCheck size={14} /> PDF or PNG · up to 10 MB</span>
+          {authStatus === "signed-in" ? (
+            <div className="upload-actions">
+              <button className="primary-button" type="button" onClick={() => fileInput.current?.click()} disabled={isUploading}>
+                <Upload size={16} /> Choose a file
+              </button>
+              {file && (
+                <button className="primary-button" type="button" onClick={onUpload} disabled={isUploading || apiStatus !== "available"}>
+                  <ArrowRight size={16} /> {isUploading ? "Uploading…" : "Upload receipt"}
+                </button>
+              )}
+            </div>
+          ) : authStatus === "checking" ? (
+            <span className="file-hint">Checking sign-in…</span>
+          ) : (
+            <a className="primary-button sign-in-button" href="/api/auth/google/login">
+              <ShieldCheck size={16} /> Sign in with Google
+            </a>
+          )}
+          <span className="file-hint"><ShieldCheck size={14} /> {retailerCode === "biedronka" ? "PDF" : "PNG"} · up to 10 MB</span>
           {fileError && <span className="file-error" role="alert">{fileError}</span>}
+          {authStatus === "signed-in" && account?.email && (
+            <span className="file-hint">Signed in as {account.email}</span>
+          )}
         </div>
         <div className="upload-side-note">
           <span className="note-icon"><Sparkles size={16} /></span>
@@ -253,7 +443,7 @@ function Receipts({ file, fileError, fileInput, onChooseFile, onClearFile, apiSt
         {file && (
           <div className="selected-file" role="status">
             <span className="file-type-icon">{file.type === "application/pdf" ? <FileText size={18} /> : <FileImage size={18} />}</span>
-            <span className="selected-file-info"><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toFixed(2)} MB · selected, not uploaded</small></span>
+            <span className="selected-file-info"><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toFixed(2)} MB · {isUploading ? "uploading" : "selected"}</small></span>
             <button className="remove-file" onClick={onClearFile} type="button" aria-label="Remove selected file">×</button>
           </div>
         )}
@@ -263,21 +453,51 @@ function Receipts({ file, fileError, fileInput, onChooseFile, onClearFile, apiSt
         <span className="notice-icon"><CircleHelp size={16} /></span>
         <p>
           {apiStatus === "available"
-            ? "The API is reachable. Receipt upload is being connected next."
-            : "This is the first deployable UI slice. Upload is not enabled until the API upload endpoint and sign-in are implemented."}
+            ? authStatus === "signed-in"
+              ? "Your uploads are private to your account. Processing status will update here."
+              : "Sign in with an invited Google account to view and upload private receipts."
+            : "The API is unavailable. Try again when the service is ready."}
         </p>
-        <button type="button" onClick={() => fileInput.current?.click()}>Select a file <ArrowRight size={14} /></button>
+        {authStatus === "signed-in" && (
+          <button type="button" onClick={() => fileInput.current?.click()}>Select a file <ArrowRight size={14} /></button>
+        )}
       </div>
 
       <div className="section-title-row history-title">
-        <div><h2>Recent receipts</h2><p>Your uploaded receipts and processing status will show here.</p></div>
-        <button className="text-button" type="button" disabled>View all <ArrowRight size={15} /></button>
+        <div><h2>Recent receipts</h2><p>Your uploaded receipts and processing status.</p></div>
+        <span className="text-button">{receipts.length} receipts</span>
       </div>
-      <div className="empty-table">
-        <div className="empty-icon"><ReceiptText size={21} /></div>
-        <strong>No receipts yet</strong>
-        <span>Select a PDF or PNG above to get started.</span>
-      </div>
+      {receiptError && <div className="file-error" role="alert">{receiptError}</div>}
+      {isLoadingReceipts ? (
+        <div className="empty-table"><strong>Loading receipts…</strong></div>
+      ) : receipts.length === 0 ? (
+        <div className="empty-table">
+          <div className="empty-icon"><ReceiptText size={21} /></div>
+          <strong>{authStatus === "signed-in" ? "No receipts yet" : "Sign in to see receipts"}</strong>
+          <span>{authStatus === "signed-in" ? "Choose a PDF or PNG above to get started." : "Your receipt history is private to your account."}</span>
+        </div>
+      ) : (
+        <div className="receipt-list">
+          {receipts.map((receipt) => (
+            <article className="receipt-row" key={receipt.id}>
+              <span className="receipt-row-icon"><ReceiptText size={17} /></span>
+              <div className="receipt-row-main">
+                <strong>{receipt.retailer_name}</strong>
+                <span>{receipt.original_filename}</span>
+              </div>
+              <span className={`receipt-status ${receipt.status}`}>
+                {receipt.status.replace("_", " ")}
+                {(receipt.status === "queued" || receipt.status === "processing") && receipt.stage
+                  ? ` · ${receipt.stage}`
+                  : ""}
+              </span>
+              <strong className="receipt-row-total">
+                {receipt.total_paid ? `${receipt.total_paid} ${receipt.currency}` : "—"}
+              </strong>
+            </article>
+          ))}
+        </div>
+      )}
       <div className="page-footnote">Receipt Tracker <span>·</span> built for clear, simple spending records</div>
     </>
   );

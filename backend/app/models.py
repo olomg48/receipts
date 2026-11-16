@@ -215,6 +215,8 @@ class ReceiptJob(Base):
     )
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(String(2000))
+    ocr_storage_key: Mapped[str | None] = mapped_column(String(512))
+    extraction_storage_key: Mapped[str | None] = mapped_column(String(512))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

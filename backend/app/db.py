@@ -5,6 +5,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import Session
 
 
 class Base(DeclarativeBase):
@@ -25,6 +26,11 @@ def get_engine() -> Engine:
     if not database_url:
         raise DatabaseNotConfiguredError("DATABASE_URL is not set")
     return _engine_for_url(database_url)
+
+
+def get_db_session():
+    with Session(get_engine()) as session:
+        yield session
 
 
 def check_database_connection() -> None:

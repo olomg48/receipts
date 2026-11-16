@@ -10,9 +10,9 @@ Browser
                                  │              ├─ users, receipts, items,
                                  │              │  products, review candidates
                                  │              └─ processing job queue
-                                 ├─ private uploaded files on k3s storage
+                                 ├─ private PDFs and processing artifacts in MinIO/S3
                                  ├─ Mistral OCR API (PDF/PNG → Markdown)
-                                 └─ LLM API (Markdown → validated JSON)
+                                 └─ Mistral LLM API (Markdown → validated JSON)
 
 k3s on one server (16 GB RAM, 4 Intel i5 cores)
   ├─ Frontend and Python API
@@ -28,9 +28,9 @@ The app supports separate user accounts. Receipts are private to the account tha
 ## Receipt ingestion and processing
 
 - Accept Biedronka PDF receipts and Lidl PNG receipts. Keep the upload pipeline extensible for other image/PDF variants.
-- Save uploads in private persistent file storage and enqueue a processing job in PostgreSQL. Jobs track status, attempts, stage, and errors so the UI can report progress and failures.
-- A Python worker sends the receipt file to the Mistral OCR API and receives Markdown. It then sends the extracted text to an LLM API to produce structured receipt JSON. Validate that JSON against an explicit schema before writing receipt data to the database.
-- Do not run local OCR on the k3s server; the chosen OCR approach is the external Mistral OCR API. The LLM provider is not yet specified.
+- Save uploads in a private MinIO/S3 bucket and enqueue a processing job in PostgreSQL. Jobs track status, attempts, stage, and errors so the UI can report progress and failures.
+- A Python worker sends the receipt file to the Mistral OCR API and receives Markdown. It then sends the extracted text to a Mistral LLM API to produce structured receipt JSON. Validate that JSON against an explicit schema before writing receipt data to the database.
+- Do not run local OCR on the k3s server; both AI processing steps use the Mistral API and the same API key.
 - The worker should retry transient failures safely, avoid duplicate receipt items on retries, and expose parse failures for correction rather than silently accepting malformed output.
 - Biedronka JSON receipt ingestion is a later extension. No representative JSON samples are available yet, so the first version should focus on PDF/PNG and avoid assuming the future JSON schema.
 
