@@ -65,14 +65,6 @@ jobs:
           push: true
           tags: ghcr.io/olomg48/receipt-tracker-frontend:${{ github.sha }}
 
-      - name: Mirror PostgreSQL to GHCR for dev
-        if: inputs.environment == 'dev'
-        uses: docker/build-push-action@v6
-        with:
-          context: infra/images/postgres
-          push: true
-          tags: ghcr.io/olomg48/receipt-tracker-postgres:17-alpine
-
       - name: Update image tags
         working-directory: infra
         env:
