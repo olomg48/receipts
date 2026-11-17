@@ -39,7 +39,7 @@ def get_storage_client() -> tuple[Minio, str]:
         access_key=access_key,
         secret_key=secret_key,
         secure=parsed.scheme == "https",
-        region=os.getenv("S3_REGION") or None,
+        region=os.getenv("S3_REGION") or "garage",
     )
     return client, bucket
 

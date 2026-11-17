@@ -38,3 +38,29 @@ def test_storage_readiness_fails_when_bucket_is_missing(monkeypatch) -> None:
         storage.check_storage_connection()
 
     assert client.checked_bucket == "receipt-files"
+
+
+@pytest.mark.parametrize(
+    ("configured_region", "expected_region"),
+    [(None, "garage"), ("custom-region", "custom-region")],
+)
+def test_storage_client_uses_garage_region_by_default(
+    monkeypatch, configured_region: str | None, expected_region: str
+) -> None:
+    client = FakeGarageClient(bucket_exists=True)
+    configure_storage(monkeypatch, client)
+    if configured_region is None:
+        monkeypatch.delenv("S3_REGION", raising=False)
+    else:
+        monkeypatch.setenv("S3_REGION", configured_region)
+
+    client_options = {}
+    monkeypatch.setattr(
+        storage,
+        "Minio",
+        lambda *_args, **kwargs: client_options.update(kwargs) or client,
+    )
+
+    storage.get_storage_client()
+
+    assert client_options["region"] == expected_region

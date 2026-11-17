@@ -26,7 +26,7 @@ Set the following environment variables for the API and worker:
 | `S3_ACCESS_KEY_ID` | Yes | Private bucket access key |
 | `S3_SECRET_ACCESS_KEY` | Yes | Private bucket secret key |
 | `S3_BUCKET` | Yes | Existing private Garage bucket for receipt files and processing artifacts |
-| `S3_REGION` | No | S3 region; defaults to the SDK default |
+| `S3_REGION` | No | S3 signing region; defaults to `garage` |
 | `SESSION_SECRET` | Yes | Long random key used to sign the login session cookie |
 | `SESSION_COOKIE_SECURE` | Yes in production | Set to `true` when the app is served over HTTPS |
 | `PUBLIC_APP_ORIGIN` | Yes | Exact browser origin, e.g. `https://receipts.example.net`, with no path or trailing slash |
