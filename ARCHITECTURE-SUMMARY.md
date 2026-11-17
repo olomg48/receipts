@@ -10,7 +10,7 @@ Browser
                                  │              ├─ users, receipts, items,
                                  │              │  products, review candidates
                                  │              └─ processing job queue
-                                 ├─ private PDFs and processing artifacts in MinIO/S3
+                                 ├─ private PDFs and processing artifacts in Garage (S3-compatible)
                                  ├─ Mistral OCR API (PDF/PNG → Markdown)
                                  └─ Mistral LLM API (Markdown → validated JSON)
 
@@ -21,14 +21,14 @@ k3s on one server (16 GB RAM, 4 Intel i5 cores)
   └─ Existing Argo CD and monitoring
 ```
 
-The application backend is planned in Python with FastAPI; the frontend is React and TypeScript. The first frontend slice has upload and product-review screens, but receipt upload, account sign-in, and review actions still require API implementation.
+The application backend is Python with FastAPI; the frontend is React and TypeScript. The app implements invite-only Google sign-in, receipt upload/history, background processing, and administrator product-code review. Insights and Metabase embedding remain future work.
 
-The app supports separate user accounts. Receipts are private to the account that uploaded them; the API must enforce ownership on every read and write. Google sign-in with invite-only access remains the proposed initial identity approach. PostgreSQL is hosted externally as a SaaS; it is not deployed on the k3s server.
+The app supports separate user accounts with invite-only Google sign-in. Receipts are private to the account that uploaded them, and owner-scoped receipt APIs enforce that boundary. PostgreSQL is hosted externally as a SaaS; it is not deployed on the k3s server.
 
 ## Receipt ingestion and processing
 
 - Accept Biedronka PDF receipts and Lidl PNG receipts. Keep the upload pipeline extensible for other image/PDF variants.
-- Save uploads in a private MinIO/S3 bucket and enqueue a processing job in PostgreSQL. Jobs track status, attempts, stage, and errors so the UI can report progress and failures.
+- Save uploads in a private Garage bucket through its S3-compatible API and enqueue a processing job in PostgreSQL. Jobs track status, attempts, stage, and errors so the UI can report progress and failures. The API readiness check and worker startup require access to the configured bucket.
 - A Python worker sends the receipt file to the Mistral OCR API and receives Markdown. It then sends the extracted text to a Mistral LLM API to produce structured receipt JSON. Validate that JSON against an explicit schema before writing receipt data to the database.
 - Do not run local OCR on the k3s server; both AI processing steps use the Mistral API and the same API key.
 - The worker should retry transient failures safely, avoid duplicate receipt items on retries, and expose parse failures for correction rather than silently accepting malformed output.
@@ -36,7 +36,7 @@ The app supports separate user accounts. Receipts are private to the account tha
 
 ## Product catalog and admin review
 
-The admin/review interface can initially be a protected section of the existing frontend, backed by authorized API endpoints. It does not need to be a separate microservice. Only designated administrators should be able to resolve product-code candidates.
+The admin/review interface is a protected section of the existing frontend, backed by authorized API endpoints. It does not need to be a separate microservice. Only designated administrators can resolve product-code candidates.
 
 Products are identified only by short codes; there is no separate full name or display name. Keep the raw product code extracted from each receipt separate from the canonical product catalog. When an unrecognized code appears, create or find a deduplicated pending candidate and show it in the admin queue. For example, `LechHvdrFree` could be reviewed and mapped to the accepted canonical product code `LechHydrFree`.
 
@@ -72,7 +72,7 @@ The 16 GB / 4-core server also runs k3s, Argo CD, monitoring, the app, and Metab
 ## Open decisions and assumptions
 
 1. **Samples and locale:** Obtain representative Lidl PNGs and Biedronka PDFs, including misspellings and discounts. Confirm the receipt language/locale and how it appears in the OCR output.
-2. **LLM provider:** Select the provider/model, data-retention settings, and acceptable cost. Determine whether it can return schema-constrained JSON; still validate all output server-side.
+2. **LLM provider:** Mistral is selected for OCR and extraction. Confirm the model, data-retention settings, and acceptable cost; still validate all output server-side.
 3. **Product review permissions:** Identify which account(s) should have administrator privileges. Decide whether every new spelling should be reviewed or whether confident/known aliases may resolve automatically.
 4. **Dashboard visibility:** Decide whether dashboards are shared across users or per-user before embedding.
 5. **File retention and storage:** Confirm how long originals are retained, whether local k3s persistent storage is acceptable, and where encrypted backups will live.

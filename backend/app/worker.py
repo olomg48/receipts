@@ -26,11 +26,12 @@ from app.models import (
     ReceiptJob,
     Retailer,
 )
+from app.product_codes import normalize_product_code
 from app.receipt_schemas import ExtractedReceipt
 from app.storage import (
     StorageNotConfiguredError,
+    check_storage_connection,
     get_object,
-    get_storage_client,
     put_object,
 )
 
@@ -150,10 +151,6 @@ def _run_extraction(markdown: str, retailer: str) -> tuple[str, ExtractedReceipt
     if len(line_numbers) != len(set(line_numbers)):
         raise ProcessingError("llm", "LLM returned duplicate receipt line numbers")
     return raw_json, parsed
-
-
-def _normalise_product_code(code: str) -> str:
-    return " ".join(code.strip().casefold().split())
 
 
 def _read_receipt_context(job_id: uuid.UUID) -> tuple[uuid.UUID, str, str, str | None]:
@@ -285,7 +282,7 @@ def _save_extraction(
 
         has_pending_codes = False
         for item in extracted.items:
-            normalized_code = _normalise_product_code(item.product_code)
+            normalized_code = normalize_product_code(item.product_code)
             product = session.scalar(
                 select(Product).where(Product.normalized_code == normalized_code)
             )
@@ -449,7 +446,7 @@ def main() -> None:
         raise DatabaseNotConfiguredError("DATABASE_URL is not set")
     if not os.getenv("MISTRAL_API_KEY"):
         raise RuntimeError("MISTRAL_API_KEY is not set")
-    get_storage_client()
+    check_storage_connection()
     get_engine()
 
     logger.info("Receipt worker started")

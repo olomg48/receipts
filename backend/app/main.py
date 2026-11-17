@@ -4,13 +4,15 @@ import logging
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 from authlib.integrations.starlette_client import OAuth
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from minio.error import S3Error
 from sqlalchemy import func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse
@@ -21,8 +23,25 @@ from app.db import (
     check_database_connection,
     get_db_session,
 )
-from app.models import AuthIdentity, Receipt, ReceiptJob, Retailer, User
-from app.storage import StorageNotConfiguredError, delete_object, put_object
+from app.models import (
+    AuthIdentity,
+    Product,
+    ProductCodeCandidate,
+    Receipt,
+    ReceiptItem,
+    ReceiptJob,
+    Retailer,
+    User,
+)
+from app.product_codes import normalize_product_code
+from app.receipt_schemas import ResolveProductCandidateRequest
+from app.storage import (
+    StorageBucketUnavailableError,
+    StorageNotConfiguredError,
+    check_storage_connection,
+    delete_object,
+    put_object,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -119,6 +138,15 @@ def get_current_user(
     return user
 
 
+def get_current_admin(user: User = Depends(get_current_user)) -> User:
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator access required",
+        )
+    return user
+
+
 @app.get("/health/live", tags=["health"])
 def liveness() -> dict[str, str]:
     return {"status": "ok"}
@@ -139,6 +167,26 @@ def readiness() -> dict[str, str]:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database is unavailable",
+        ) from None
+
+    try:
+        check_storage_connection()
+    except StorageNotConfiguredError:
+        logger.error("Readiness check failed: object storage is not configured")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Object storage is not configured",
+        ) from None
+    except (
+        StorageBucketUnavailableError,
+        S3Error,
+        Urllib3Error,
+        OSError,
+    ):
+        logger.exception("Readiness check failed: object storage is unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Object storage is unavailable",
         ) from None
 
     return {"status": "ok"}
@@ -368,7 +416,14 @@ def list_receipts(
     session: Session = Depends(get_db_session),
 ) -> list[dict[str, object]]:
     rows = session.execute(
-        select(Receipt, Retailer.code, Retailer.display_name, ReceiptJob.stage)
+        select(
+            Receipt,
+            Retailer.code,
+            Retailer.display_name,
+            ReceiptJob.stage,
+            ReceiptJob.status,
+            ReceiptJob.last_error,
+        )
         .join(Retailer, Receipt.retailer_id == Retailer.id)
         .outerjoin(ReceiptJob, ReceiptJob.receipt_id == Receipt.id)
         .where(Receipt.uploaded_by_id == user.id)
@@ -391,8 +446,9 @@ def list_receipts(
             "status": receipt.status,
             "created_at": receipt.created_at.isoformat() if receipt.created_at else None,
             "stage": stage,
+            "error": last_error if job_status == "failed" else None,
         }
-        for receipt, retailer_code, retailer_name, stage in rows
+        for receipt, retailer_code, retailer_name, stage, job_status, last_error in rows
     ]
 
 
@@ -421,4 +477,170 @@ def get_receipt(
         "status": receipt.status,
         "stage": job.stage if job else None,
         "error": job.last_error if job and job.status == "failed" else None,
+    }
+
+
+@app.get("/admin/product-candidates", tags=["products"])
+def list_product_candidates(
+    _: User = Depends(get_current_admin),
+    session: Session = Depends(get_db_session),
+) -> list[dict[str, object]]:
+    occurrence_count = (
+        select(func.count(ReceiptItem.id))
+        .where(ReceiptItem.product_code_candidate_id == ProductCodeCandidate.id)
+        .scalar_subquery()
+    )
+    rows = session.execute(
+        select(ProductCodeCandidate, occurrence_count.label("occurrence_count"))
+        .where(ProductCodeCandidate.status == "pending")
+        .order_by(ProductCodeCandidate.created_at, ProductCodeCandidate.id)
+    ).all()
+    return [
+        {
+            "id": str(candidate.id),
+            "observed_code": candidate.observed_code,
+            "occurrence_count": count,
+            "created_at": candidate.created_at.isoformat(),
+        }
+        for candidate, count in rows
+    ]
+
+
+@app.get("/admin/products", tags=["products"])
+def list_products(
+    _: User = Depends(get_current_admin),
+    session: Session = Depends(get_db_session),
+) -> list[dict[str, str]]:
+    products = session.scalars(select(Product).order_by(Product.code, Product.id)).all()
+    return [{"id": str(product.id), "code": product.code} for product in products]
+
+
+@app.post("/admin/product-candidates/{candidate_id}/resolve", tags=["products"])
+def resolve_product_candidate(
+    candidate_id: uuid.UUID,
+    request: Request,
+    resolution: ResolveProductCandidateRequest,
+    user: User = Depends(get_current_admin),
+    session: Session = Depends(get_db_session),
+) -> dict[str, str]:
+    _require_same_origin(request)
+    candidate = session.scalar(
+        select(ProductCodeCandidate)
+        .where(ProductCodeCandidate.id == candidate_id)
+        .with_for_update()
+    )
+    if candidate is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product-code candidate not found",
+        )
+    if candidate.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Product-code candidate has already been resolved",
+        )
+
+    product: Product | None
+    if resolution.resolution_type == "mapped_existing":
+        product_id = resolution.product_id
+        if product_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A canonical product is required",
+            )
+        product = session.get(Product, product_id)
+        if product is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Canonical product not found",
+            )
+    else:
+        code = (
+            candidate.observed_code
+            if resolution.resolution_type == "accepted_as_is"
+            else resolution.product_code
+        )
+        if code is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A canonical product code is required",
+            )
+        normalized_code = normalize_product_code(code)
+        product = session.scalar(
+            select(Product).where(Product.normalized_code == normalized_code)
+        )
+        if product is None:
+            product = Product(
+                code=code,
+                normalized_code=normalized_code,
+                created_by_id=user.id,
+            )
+            session.add(product)
+            try:
+                session.flush()
+            except IntegrityError:
+                session.rollback()
+                logger.exception(
+                    "Canonical product code conflicted while resolving candidate %s",
+                    candidate_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="That canonical product code already exists; map to it instead",
+                ) from None
+        elif resolution.resolution_type == "edited_code":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="That canonical product code already exists; map to it instead",
+            )
+
+    affected_receipt_ids = session.scalars(
+        select(ReceiptItem.receipt_id)
+        .where(ReceiptItem.product_code_candidate_id == candidate.id)
+        .distinct()
+    ).all()
+    candidate.status = "resolved"
+    candidate.canonical_product_id = product.id
+    candidate.resolution_type = resolution.resolution_type
+    candidate.reviewed_by_id = user.id
+    candidate.reviewed_at = datetime.now(timezone.utc)
+    session.execute(
+        update(ReceiptItem)
+        .where(ReceiptItem.product_code_candidate_id == candidate.id)
+        .values(product_id=product.id)
+    )
+
+    for receipt_id in affected_receipt_ids:
+        pending_item_id = session.scalar(
+            select(ReceiptItem.id)
+            .join(
+                ProductCodeCandidate,
+                ReceiptItem.product_code_candidate_id == ProductCodeCandidate.id,
+            )
+            .where(
+                ReceiptItem.receipt_id == receipt_id,
+                ProductCodeCandidate.status == "pending",
+            )
+            .limit(1)
+        )
+        if pending_item_id is None:
+            receipt = session.get(Receipt, receipt_id)
+            if receipt is not None and receipt.status == "needs_review":
+                receipt.status = "complete"
+
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        logger.exception("Conflict while resolving product candidate %s", candidate_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The product-code resolution conflicts with existing data",
+        ) from None
+
+    return {
+        "id": str(candidate.id),
+        "status": candidate.status,
+        "product_id": str(product.id),
+        "product_code": product.code,
     }

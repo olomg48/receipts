@@ -11,6 +11,10 @@ class StorageNotConfiguredError(RuntimeError):
     pass
 
 
+class StorageBucketUnavailableError(RuntimeError):
+    pass
+
+
 def get_storage_client() -> tuple[Minio, str]:
     endpoint_url = os.getenv("S3_ENDPOINT_URL")
     access_key = os.getenv("S3_ACCESS_KEY_ID")
@@ -38,6 +42,14 @@ def get_storage_client() -> tuple[Minio, str]:
         region=os.getenv("S3_REGION") or None,
     )
     return client, bucket
+
+
+def check_storage_connection() -> None:
+    client, bucket = get_storage_client()
+    if not client.bucket_exists(bucket):
+        raise StorageBucketUnavailableError(
+            f"Configured object storage bucket {bucket!r} does not exist"
+        )
 
 
 def put_object(
@@ -74,7 +86,9 @@ def delete_object(object_key: str) -> None:
 
 __all__ = [
     "S3Error",
+    "StorageBucketUnavailableError",
     "StorageNotConfiguredError",
+    "check_storage_connection",
     "delete_object",
     "get_object",
     "get_storage_client",

@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { Account, apiRequest, ReceiptSummary } from "./api";
+import type { FormEvent } from "react";
+import { apiRequest } from "./api";
+import {
+  type Account,
+  type CandidateResolution,
+  type CandidateResolutionResult,
+  type CanonicalProduct,
+  type ProductCodeCandidate,
+  type ReceiptSummary,
+} from "./api";
 import {
   ArrowDownToLine,
   ArrowRight,
@@ -33,6 +42,11 @@ function App() {
   const [fileError, setFileError] = useState<string | null>(null);
   const [receipts, setReceipts] = useState<ReceiptSummary[]>([]);
   const [receiptError, setReceiptError] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<ProductCodeCandidate[]>([]);
+  const [products, setProducts] = useState<CanonicalProduct[]>([]);
+  const [productError, setProductError] = useState<string | null>(null);
+  const [isLoadingCandidates, setIsLoadingCandidates] = useState(false);
+  const [resolvingCandidateId, setResolvingCandidateId] = useState<string | null>(null);
   const [isLoadingReceipts, setIsLoadingReceipts] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [retailerCode, setRetailerCode] = useState("biedronka");
@@ -125,6 +139,40 @@ function App() {
     };
   }, [authStatus, hasActiveReceipts]);
 
+  useEffect(() => {
+    if (authStatus !== "signed-in" || !account?.is_admin || view !== "products") {
+      return;
+    }
+
+    let active = true;
+    setIsLoadingCandidates(true);
+    setProductError(null);
+    Promise.all([
+      apiRequest<ProductCodeCandidate[]>("/admin/product-candidates"),
+      apiRequest<CanonicalProduct[]>("/admin/products"),
+    ])
+      .then(([candidateRows, productRows]) => {
+        if (active) {
+          setCandidates(candidateRows);
+          setProducts(productRows);
+        }
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setProductError(error instanceof Error ? error.message : "Could not load product review data.");
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsLoadingCandidates(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [account?.is_admin, authStatus, view]);
+
   function chooseFile(file?: File) {
     if (!file) {
       return;
@@ -184,10 +232,46 @@ function App() {
       setAccount(null);
       setAuthStatus("signed-out");
       hasLoadedReceipts.current = false;
+      setView("receipts");
+      setCandidates([]);
+      setProducts([]);
     }
   }
 
-  const isProducts = view === "products";
+  async function resolveCandidate(candidateId: string, resolution: CandidateResolution) {
+    setResolvingCandidateId(candidateId);
+    setProductError(null);
+    try {
+      const result = await apiRequest<CandidateResolutionResult>(
+        `/admin/product-candidates/${candidateId}/resolve`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(resolution),
+        },
+      );
+      setCandidates((current) => current.filter((candidate) => candidate.id !== candidateId));
+      setProducts((current) => (
+        current.some((product) => product.id === result.product_id)
+          ? current
+          : [...current, { id: result.product_id, code: result.product_code }].sort(
+              (a, b) => a.code.localeCompare(b.code),
+            )
+      ));
+      try {
+        setReceipts(await apiRequest<ReceiptSummary[]>("/receipts"));
+        setReceiptError(null);
+      } catch (error) {
+        setReceiptError(error instanceof Error ? error.message : "Could not refresh receipt statuses.");
+      }
+    } catch (error) {
+      setProductError(error instanceof Error ? error.message : "Could not resolve product code.");
+    } finally {
+      setResolvingCandidateId(null);
+    }
+  }
+
+  const isProducts = view === "products" && account?.is_admin === true;
 
   return (
     <div className="app-shell">
@@ -213,17 +297,19 @@ function App() {
           >
             <ReceiptText size={18} />
             <span>Receipts</span>
-            <span className="nav-count">0</span>
+            <span className="nav-count">{receipts.length}</span>
           </button>
-          <button
-            type="button"
-            className={`nav-item ${isProducts ? "active" : ""}`}
-            onClick={() => setView("products")}
-          >
-            <PackageCheck size={18} />
-            <span>Product review</span>
-            <span className="nav-count">0</span>
-          </button>
+          {account?.is_admin && (
+            <button
+              type="button"
+              className={`nav-item ${isProducts ? "active" : ""}`}
+              onClick={() => setView("products")}
+            >
+              <PackageCheck size={18} />
+              <span>Product review</span>
+              <span className="nav-count">{candidates.length}</span>
+            </button>
+          )}
           <button type="button" className="nav-item muted-item" disabled>
             <LayoutDashboard size={18} />
             <span>Insights</span>
@@ -236,16 +322,21 @@ function App() {
             <span className="tip-icon"><Sparkles size={16} /></span>
             <strong>Good to know</strong>
             <p>Product codes are reviewed once, then matched automatically next time.</p>
-            <button type="button" onClick={() => setView("products")}>
-              How review works <ArrowRight size={14} />
-            </button>
+            {account?.is_admin && (
+              <button type="button" onClick={() => setView("products")}>
+                How review works <ArrowRight size={14} />
+              </button>
+            )}
           </div>
           <button className="nav-item footer-link" type="button" disabled>
             <Settings2 size={17} /><span>Settings</span>
           </button>
           <div className="user-row">
-            <span className="user-avatar">U</span>
-            <span className="user-label">Your account<small>Sign-in coming soon</small></span>
+            <span className="user-avatar">{account?.display_name?.[0]?.toUpperCase() ?? "U"}</span>
+            <span className="user-label">
+              {account?.display_name ?? "Your account"}
+              <small>{account?.email ?? (authStatus === "checking" ? "Checking sign-in" : "Not signed in")}</small>
+            </span>
             <CircleHelp size={17} className="muted-icon" />
           </div>
         </div>
@@ -272,7 +363,17 @@ function App() {
 
         <div className="page-content">
           {isProducts ? (
-            <ProductReview search={search} setSearch={setSearch} onAddReceipt={() => setView("receipts")} />
+            <ProductReview
+              search={search}
+              setSearch={setSearch}
+              candidates={candidates}
+              products={products}
+              error={productError}
+              isLoading={isLoadingCandidates}
+              resolvingCandidateId={resolvingCandidateId}
+              onResolve={resolveCandidate}
+              onAddReceipt={() => setView("receipts")}
+            />
           ) : (
             <Receipts
               file={selectedFile}
@@ -494,6 +595,11 @@ function Receipts({
               <strong className="receipt-row-total">
                 {receipt.total_paid ? `${receipt.total_paid} ${receipt.currency}` : "—"}
               </strong>
+              {receipt.status === "failed" && receipt.error && (
+                <span className="receipt-error" role="status">
+                  {receipt.stage ? `${receipt.stage}: ` : ""}{receipt.error}
+                </span>
+              )}
             </article>
           ))}
         </div>
@@ -506,12 +612,28 @@ function Receipts({
 function ProductReview({
   search,
   setSearch,
+  candidates,
+  products,
+  error,
+  isLoading,
+  resolvingCandidateId,
+  onResolve,
   onAddReceipt,
 }: {
   search: string;
   setSearch: (value: string) => void;
+  candidates: ProductCodeCandidate[];
+  products: CanonicalProduct[];
+  error: string | null;
+  isLoading: boolean;
+  resolvingCandidateId: string | null;
+  onResolve: (candidateId: string, resolution: CandidateResolution) => void;
   onAddReceipt: () => void;
 }) {
+  const filteredCandidates = candidates.filter((candidate) =>
+    candidate.observed_code.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
+  );
+
   return (
     <>
       <div className="page-heading">
@@ -520,7 +642,7 @@ function ProductReview({
           <h1>Product <span>review.</span></h1>
           <p>Resolve unfamiliar receipt codes once. We’ll remember your choice for next time.</p>
         </div>
-        <span className="queue-badge"><span /> 0 awaiting review</span>
+        <span className="queue-badge"><span /> {candidates.length} awaiting review</span>
       </div>
 
       <div className="review-summary">
@@ -530,29 +652,146 @@ function ProductReview({
       </div>
 
       <div className="section-title-row review-list-heading">
-        <div><h2>Needs your attention <span className="small-count">0</span></h2><p>New codes will appear here after a receipt is processed.</p></div>
+        <div><h2>Needs your attention <span className="small-count">{candidates.length}</span></h2><p>New codes will appear here after a receipt is processed.</p></div>
         <label className="search-box">
           <Search size={16} />
           <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search product codes" />
-          <kbd>⌘ K</kbd>
         </label>
       </div>
 
-      <div className="review-empty">
-        <div className="review-empty-illustration">
-          <div className="review-check"><Check size={23} /></div>
-          <div className="review-code">LechHydrFree</div>
-          <div className="review-code faded">LechHvdrFree</div>
+      {error && <div className="file-error" role="alert">{error}</div>}
+      {isLoading ? (
+        <div className="review-empty"><strong>Loading product codes…</strong></div>
+      ) : filteredCandidates.length === 0 ? (
+        <div className="review-empty">
+          <div className="review-empty-illustration">
+            <div className="review-check"><Check size={23} /></div>
+            <div className="review-code">Product code</div>
+            <div className="review-code faded">Needs review</div>
+          </div>
+          <strong>{candidates.length === 0 ? "All clear for now" : "No matching product codes"}</strong>
+          <p>
+            {candidates.length === 0
+              ? "New or unfamiliar codes will appear here after a receipt is processed."
+              : "Try another search, or clear the search field to see all pending codes."}
+          </p>
+          {candidates.length === 0 && (
+            <button className="secondary-button" type="button" onClick={onAddReceipt}>
+              <Plus size={15} /> Add a receipt <ArrowRight size={14} />
+            </button>
+          )}
+          <span className="review-empty-foot"><ShieldCheck size={13} /> Only administrators can change the product catalog.</span>
         </div>
-        <strong>All clear for now</strong>
-        <p>When a receipt contains a new or misspelled code, it’ll land here for a quick decision.</p>
-        <button className="secondary-button" type="button" onClick={onAddReceipt}>
-          <Plus size={15} /> Add a receipt <ArrowRight size={14} />
-        </button>
-        <span className="review-empty-foot"><ShieldCheck size={13} /> Only authorized reviewers can change the product catalog.</span>
-      </div>
+      ) : (
+        <div className="candidate-list">
+          {filteredCandidates.map((candidate) => (
+            <CandidateReviewCard
+              key={candidate.id}
+              candidate={candidate}
+              products={products}
+              isResolving={resolvingCandidateId === candidate.id}
+              onResolve={onResolve}
+            />
+          ))}
+        </div>
+      )}
       <div className="page-footnote">Product codes are matched exactly after your review <span>·</span> no display names required</div>
     </>
+  );
+}
+
+function CandidateReviewCard({
+  candidate,
+  products,
+  isResolving,
+  onResolve,
+}: {
+  candidate: ProductCodeCandidate;
+  products: CanonicalProduct[];
+  isResolving: boolean;
+  onResolve: (candidateId: string, resolution: CandidateResolution) => void;
+}) {
+  const [resolutionType, setResolutionType] = useState<CandidateResolution["resolution_type"]>("accepted_as_is");
+  const [productCode, setProductCode] = useState(candidate.observed_code);
+  const [productId, setProductId] = useState(products[0]?.id ?? "");
+
+  function submitResolution(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (resolutionType === "accepted_as_is") {
+      onResolve(candidate.id, { resolution_type: resolutionType });
+    } else if (resolutionType === "edited_code") {
+      onResolve(candidate.id, { resolution_type: resolutionType, product_code: productCode });
+    } else if (productId) {
+      onResolve(candidate.id, { resolution_type: resolutionType, product_id: productId });
+    }
+  }
+
+  return (
+    <article className="candidate-card">
+      <div className="candidate-heading">
+        <div>
+          <span className="candidate-label">OBSERVED CODE</span>
+          <strong>{candidate.observed_code}</strong>
+        </div>
+        <span className="candidate-occurrences">
+          {candidate.occurrence_count} {candidate.occurrence_count === 1 ? "receipt line" : "receipt lines"}
+        </span>
+      </div>
+      <form className="candidate-form" onSubmit={submitResolution}>
+        <label>
+          Resolve as
+          <select
+            value={resolutionType}
+            onChange={(event) => {
+              const value = event.target.value;
+              if (value === "accepted_as_is" || value === "edited_code" || value === "mapped_existing") {
+                setResolutionType(value);
+              }
+            }}
+            disabled={isResolving}
+          >
+            <option value="accepted_as_is">Accept observed code</option>
+            <option value="edited_code">Edit and create canonical code</option>
+            <option value="mapped_existing">Map to an existing product</option>
+          </select>
+        </label>
+        {resolutionType === "edited_code" && (
+          <label>
+            Canonical code
+            <input
+              value={productCode}
+              onChange={(event) => setProductCode(event.target.value)}
+              maxLength={300}
+              required
+              disabled={isResolving}
+            />
+          </label>
+        )}
+        {resolutionType === "mapped_existing" && (
+          <label>
+            Existing product
+            <select
+              value={productId}
+              onChange={(event) => setProductId(event.target.value)}
+              required
+              disabled={isResolving || products.length === 0}
+            >
+              <option value="" disabled>Select a product</option>
+              {products.map((product) => (
+                <option key={product.id} value={product.id}>{product.code}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        <button
+          className="secondary-button"
+          type="submit"
+          disabled={isResolving || (resolutionType === "mapped_existing" && products.length === 0)}
+        >
+          {isResolving ? "Saving…" : "Resolve code"}
+        </button>
+      </form>
+    </article>
   );
 }
 

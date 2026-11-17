@@ -18,6 +18,31 @@ export type ReceiptSummary = {
   status: "uploaded" | "queued" | "processing" | "needs_review" | "complete" | "failed";
   created_at: string | null;
   stage: string | null;
+  error: string | null;
+};
+
+export type ProductCodeCandidate = {
+  id: string;
+  observed_code: string;
+  occurrence_count: number;
+  created_at: string;
+};
+
+export type CanonicalProduct = {
+  id: string;
+  code: string;
+};
+
+export type CandidateResolution =
+  | { resolution_type: "accepted_as_is" }
+  | { resolution_type: "edited_code"; product_code: string }
+  | { resolution_type: "mapped_existing"; product_id: string };
+
+export type CandidateResolutionResult = {
+  id: string;
+  status: "resolved";
+  product_id: string;
+  product_code: string;
 };
 
 export async function apiRequest<T>(

@@ -147,6 +147,7 @@ h1 span { color: #8b9b8d; font-weight: 500; }
 .receipt-status.needs_review { color: #8a6333; background: #f8eddb; }
 .receipt-status.failed { color: #9c4c43; background: #fae9e6; }
 .receipt-row-total { min-width: 82px; color: #414c43; font-size: 10px; text-align: right; }
+.receipt-error { flex-basis: 100%; margin-left: 46px; color: #9c4c43; font-size: 9px; line-height: 1.5; }
 .page-footnote { margin-top: 27px; color: #a4a8a1; font-size: 9px; text-align: center; }
 .page-footnote span { padding: 0 5px; color: #c5c8c1; }
 
@@ -175,6 +176,18 @@ h1 span { color: #8b9b8d; font-weight: 500; }
 .secondary-button { display: flex; align-items: center; gap: 7px; padding: 8px 11px; border: 1px solid #dfe8dc; border-radius: 6px; color: #507657; background: #f9fbf7; font-size: 9px; font-weight: 600; }
 .review-empty-foot { display: flex; align-items: center; gap: 5px; margin-top: auto; padding-top: 19px; color: #a3a89f; font-size: 8px; }
 .review-empty-foot svg { color: #80a184; }
+.candidate-list { display: grid; gap: 10px; }
+.candidate-card { padding: 16px; border: 1px solid #e8e9e2; border-radius: 10px; background: #fff; }
+.candidate-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.candidate-heading > div { display: grid; gap: 5px; }
+.candidate-label { color: #a0a59e; font-size: 8px; font-weight: 700; letter-spacing: .8px; }
+.candidate-heading strong { color: #39453c; font-size: 13px; overflow-wrap: anywhere; }
+.candidate-occurrences { color: #90978e; font-size: 9px; white-space: nowrap; }
+.candidate-form { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.candidate-form label { display: grid; flex: 1; min-width: 180px; gap: 5px; color: #778077; font-size: 9px; }
+.candidate-form input, .candidate-form select { min-width: 0; padding: 8px; border: 1px solid #e7e7e0; border-radius: 6px; color: #505850; background: #fff; font-size: 10px; }
+.candidate-form .secondary-button { min-height: 33px; white-space: nowrap; }
+.candidate-form .secondary-button:disabled { opacity: .55; cursor: default; }
 
 @media (max-width: 1050px) {
   .sidebar { width: 220px; flex-basis: 220px; }
@@ -220,4 +233,7 @@ h1 span { color: #8b9b8d; font-weight: 500; }
   .receipt-row { flex-wrap: wrap; }
   .receipt-status { margin-left: 46px; }
   .receipt-row-total { margin-left: auto; }
+  .candidate-form { align-items: stretch; flex-direction: column; }
+  .candidate-form label { min-width: 0; }
+  .candidate-form .secondary-button { align-self: flex-start; }
 }

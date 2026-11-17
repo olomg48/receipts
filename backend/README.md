@@ -3,9 +3,10 @@
 The API is a Python 3.12 FastAPI service. Its container exposes:
 
 - `GET /health/live` for Kubernetes liveness probes.
-- `GET /health/ready` for readiness probes; this checks PostgreSQL connectivity.
+- `GET /health/ready` for readiness probes; this checks PostgreSQL and the configured Garage bucket.
 - Google OAuth endpoints under `/auth/google/` and `/auth/me`.
 - `POST /receipts` and `GET /receipts` for authenticated receipt upload and history.
+- Administrator-only product review endpoints under `/admin/`.
 - `GET /docs` for the interactive API documentation.
 
 ## Runtime configuration
@@ -21,10 +22,10 @@ Set the following environment variables for the API and worker:
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | External PostgreSQL connection string |
-| `S3_ENDPOINT_URL` | Yes | MinIO/S3 endpoint, for example `https://minio.example.net:9000` |
+| `S3_ENDPOINT_URL` | Yes | Garage S3 API endpoint, for example `https://garage.example.net` |
 | `S3_ACCESS_KEY_ID` | Yes | Private bucket access key |
 | `S3_SECRET_ACCESS_KEY` | Yes | Private bucket secret key |
-| `S3_BUCKET` | Yes | Existing private bucket for receipt files and processing artifacts |
+| `S3_BUCKET` | Yes | Existing private Garage bucket for receipt files and processing artifacts |
 | `S3_REGION` | No | S3 region; defaults to the SDK default |
 | `SESSION_SECRET` | Yes | Long random key used to sign the login session cookie |
 | `SESSION_COOKIE_SECURE` | Yes in production | Set to `true` when the app is served over HTTPS |
@@ -38,13 +39,17 @@ Set the following environment variables for the API and worker:
 | `MISTRAL_OCR_MODEL` | No | OCR model; defaults to `mistral-ocr-latest` |
 | `MISTRAL_LLM_MODEL` | No | JSON extraction model; defaults to `mistral-small-latest` |
 
-Create the S3 bucket and credentials through your infrastructure process. The application does not create buckets or make them public. Give the API and worker access only to the required private bucket. Never expose these secrets to the frontend or commit them to Git.
+Provision the Garage bucket and app-specific S3 credentials through your infrastructure/bootstrap process. The API and worker use Garage's S3-compatible API; they do not need the Garage admin token and do not create buckets. Configure the generated key with access only to the required private bucket. Never expose these credentials to the frontend or commit them to Git.
 
 Uploads are limited to 10 MiB. The first supported combinations are Biedronka PDF and Lidl PNG. The API stores originals under `receipts/<receipt-id>/original.<extension>`, and the worker stores OCR Markdown and validated-output JSON alongside them. PostgreSQL stores the object keys and structured receipt/product data.
 
 Google OAuth uses an invite-only email allowlist. Register the callback URL exactly as `GOOGLE_REDIRECT_URI`; the callback route is `/auth/google/callback` on the API and `/api/auth/google/callback` through the frontend Nginx proxy. Configure the same public origin in `PUBLIC_APP_ORIGIN`; cookie-authenticated upload and logout requests require it to match the browser's `Origin` header.
 
 Run the API as the container's default command. Run the same image as a separate worker process with `python -m app.worker`; only the worker needs the Mistral API key. Keep secrets in the runtime secret manager.
+
+The readiness endpoint returns `503` until both PostgreSQL and the configured Garage bucket are reachable using the app-specific S3 credentials. The worker also verifies bucket access before starting its processing loop.
+
+Product review requires a signed-in user whose `is_admin` flag is true. `GET /admin/product-candidates` lists pending codes, `GET /admin/products` lists canonical codes, and `POST /admin/product-candidates/{candidate_id}/resolve` accepts a code, edits it into a canonical code, or maps it to an existing product. Resolving a code updates its receipt items and completes receipts with no remaining pending codes.
 
 ## Database migrations
 

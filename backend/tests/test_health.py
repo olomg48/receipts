@@ -29,8 +29,23 @@ def test_readiness_returns_service_unavailable_without_database(
 
 def test_readiness_succeeds_when_database_check_succeeds(monkeypatch) -> None:
     monkeypatch.setattr(main, "check_database_connection", lambda: None)
+    monkeypatch.setattr(main, "check_storage_connection", lambda: None)
 
     response = client.get("/health/ready")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_readiness_fails_when_object_storage_bucket_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(main, "check_database_connection", lambda: None)
+
+    def missing_bucket() -> None:
+        raise main.StorageBucketUnavailableError("bucket is missing")
+
+    monkeypatch.setattr(main, "check_storage_connection", missing_bucket)
+
+    response = client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Object storage is unavailable"}
