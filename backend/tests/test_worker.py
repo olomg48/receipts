@@ -197,6 +197,35 @@ def test_mistral_extraction_validates_structured_output(monkeypatch):
     assert parsed.total_paid == 9
 
 
+def test_mistral_extraction_reports_schema_path_without_receipt_values(monkeypatch):
+    output = {
+        "receipt_number": "sensitive-receipt-number",
+        "items": [{"line_number": 1, "quantity": "1"}],
+    }
+
+    def responder(_request):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(output)}}]},
+        )
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    monkeypatch.setattr(
+        worker,
+        "_client",
+        lambda stage: httpx.Client(
+            base_url=worker.MISTRAL_API_BASE,
+            transport=httpx.MockTransport(responder),
+        ),
+    )
+
+    with pytest.raises(worker.ProcessingError) as error:
+        worker._run_extraction("text", "Biedronka")
+
+    assert "items.0.product_code: missing" in str(error.value)
+    assert "sensitive-receipt-number" not in str(error.value)
+
+
 def test_process_next_job_saves_artifacts_and_persists_extracted_receipt(monkeypatch):
     engine, receipt_id, job_id, source_key = _create_worker_database()
 

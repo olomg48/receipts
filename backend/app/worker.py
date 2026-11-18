@@ -150,10 +150,29 @@ def _run_extraction(markdown: str, retailer: str) -> tuple[str, ExtractedReceipt
         raise ProcessingError("llm", "LLM provider could not be reached") from None
 
     try:
-        raw_json = response.json()["choices"][0]["message"]["content"]
+        result = response.json()
+    except ValueError:
+        raise ProcessingError("llm", "LLM returned a non-JSON API response") from None
+    try:
+        raw_json = result["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise ProcessingError("llm", "LLM response is missing message content") from None
+    if not isinstance(raw_json, str):
+        raise ProcessingError("llm", "LLM message content is not text")
+    try:
         parsed = ExtractedReceipt.model_validate_json(raw_json)
-    except (KeyError, IndexError, TypeError, ValueError, ValidationError):
-        raise ProcessingError("llm", "LLM returned invalid receipt data") from None
+    except ValidationError as error:
+        issues = error.errors(include_input=False, include_context=False)
+        details = [
+            f"{'.'.join(str(part) for part in issue['loc']) or '$'}: {issue['type']}"
+            for issue in issues[:5]
+        ]
+        if len(issues) > len(details):
+            details.append(f"{len(issues) - len(details)} more")
+        raise ProcessingError(
+            "llm",
+            f"LLM output failed receipt validation ({'; '.join(details)})",
+        ) from None
 
     line_numbers = [item.line_number for item in parsed.items]
     if len(line_numbers) != len(set(line_numbers)):
