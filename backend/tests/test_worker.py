@@ -154,6 +154,7 @@ def test_mistral_ocr_rejects_malformed_page_data(monkeypatch, result):
 
 
 def test_mistral_extraction_validates_structured_output(monkeypatch):
+    requests = []
     output = {
         "receipt_number": "R-1",
         "purchased_at": None,
@@ -174,7 +175,8 @@ def test_mistral_extraction_validates_structured_output(monkeypatch):
         ],
     }
 
-    def responder(_request):
+    def responder(request):
+        requests.append(json.loads(request.content))
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps(output)}}]},
@@ -195,6 +197,9 @@ def test_mistral_extraction_validates_structured_output(monkeypatch):
     assert json.loads(raw_json) == output
     assert parsed.items[0].product_code == "ABC"
     assert parsed.total_paid == 9
+    system_prompt = requests[0]["messages"][0]["content"].lower()
+    assert "always return a number, never null" in system_prompt
+    assert "use 0 when no discount is shown" in system_prompt
 
 
 def test_mistral_extraction_reports_schema_path_without_receipt_values(monkeypatch):
