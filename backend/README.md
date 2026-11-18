@@ -4,9 +4,9 @@ The API is a Python 3.12 FastAPI service. Its container exposes:
 
 - `GET /health/live` for Kubernetes liveness probes.
 - `GET /health/ready` for readiness probes; this checks PostgreSQL and the configured Garage bucket.
-- Google OAuth endpoints under `/auth/google/` and `/auth/me`.
-- `POST /receipts` and `GET /receipts` for authenticated receipt upload and history.
-- Administrator-only product review endpoints under `/admin/`.
+- `POST /receipts` and `GET /receipts` for receipt upload and history.
+- `GET /analytics` for spending summaries across the single-owner app.
+- Product review endpoints under `/admin/`.
 - `GET /docs` for the interactive API documentation.
 
 ## Runtime configuration
@@ -17,7 +17,7 @@ Set `DATABASE_URL` at runtime to a SQLAlchemy PostgreSQL URL, for example:
 postgresql+psycopg://user:password@db.example.net:5432/receipts?sslmode=require
 ```
 
-Set the following environment variables for the API and worker:
+Set these variables for the API, worker, or both as indicated:
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
@@ -27,14 +27,8 @@ Set the following environment variables for the API and worker:
 | `S3_SECRET_ACCESS_KEY` | Yes | Private bucket secret key |
 | `S3_BUCKET` | Yes | Existing private Garage bucket for receipt files and processing artifacts |
 | `S3_REGION` | No | S3 signing region; defaults to `garage` |
-| `SESSION_SECRET` | Yes | Long random key used to sign the login session cookie |
-| `SESSION_COOKIE_SECURE` | Yes in production | Set to `true` when the app is served over HTTPS |
-| `PUBLIC_APP_ORIGIN` | Yes | Exact browser origin, e.g. `https://receipts.example.net`, with no path or trailing slash |
-| `GOOGLE_CLIENT_ID` | Yes | Google OAuth client ID |
-| `GOOGLE_CLIENT_SECRET` | Yes | Google OAuth client secret |
-| `GOOGLE_REDIRECT_URI` | Yes | Exact registered callback URL, e.g. `https://receipts.example.net/api/auth/google/callback` |
-| `INVITED_EMAILS` | Yes | Comma-separated allowlist of accounts permitted to sign in |
-| `ADMIN_EMAILS` | No | Comma-separated accounts that receive the admin flag on first sign-in |
+| `PUBLIC_APP_ORIGIN` | Yes | Exact browser origin, e.g. `http://receipts.local`, used to reject cross-origin browser writes |
+| `SINGLE_USER_EMAIL` | No | Email label for the internal owner row; defaults to `owner@local` |
 | `MISTRAL_API_KEY` | Yes for worker | Mistral API key shared by OCR and LLM calls |
 | `MISTRAL_OCR_MODEL` | No | OCR model; defaults to `mistral-ocr-latest` |
 | `MISTRAL_LLM_MODEL` | No | JSON extraction model; defaults to `mistral-small-latest` |
@@ -43,13 +37,15 @@ Provision the Garage bucket and app-specific S3 credentials through your infrast
 
 Uploads are limited to 10 MiB. The first supported combinations are Biedronka PDF and Lidl PNG. The API stores originals under `receipts/<receipt-id>/original.<extension>`, and the worker stores OCR Markdown and validated-output JSON alongside them. PostgreSQL stores the object keys and structured receipt/product data.
 
-Google OAuth uses an invite-only email allowlist. Register the callback URL exactly as `GOOGLE_REDIRECT_URI`; the callback route is `/auth/google/callback` on the API and `/api/auth/google/callback` through the frontend Nginx proxy. Configure the same public origin in `PUBLIC_APP_ORIGIN`; cookie-authenticated upload and logout requests require it to match the browser's `Origin` header.
+The app has no application-level login or user-level data separation. Anyone who can reach it can view receipts, upload files, and use product review. Restrict network access to trusted devices using your firewall, VPN, or cluster/network policy; `PUBLIC_APP_ORIGIN` is only a cross-origin browser-write safeguard, not authentication.
 
 Run the API as the container's default command. Run the same image as a separate worker process with `python -m app.worker`; only the worker needs the Mistral API key. Keep secrets in the runtime secret manager.
 
 The readiness endpoint returns `503` until both PostgreSQL and the configured Garage bucket are reachable using the app-specific S3 credentials. The worker also verifies bucket access before starting its processing loop.
 
-Product review requires a signed-in user whose `is_admin` flag is true. `GET /admin/product-candidates` lists pending codes, `GET /admin/products` lists canonical codes, and `POST /admin/product-candidates/{candidate_id}/resolve` accepts a code, edits it into a canonical code, or maps it to an existing product. Resolving a code updates its receipt items and completes receipts with no remaining pending codes.
+`GET /admin/product-candidates` lists pending codes, `GET /admin/products` lists canonical codes, and `POST /admin/product-candidates/{candidate_id}/resolve` accepts a code, edits it into a canonical code, or maps it to an existing product. Resolving a code updates its receipt items and completes receipts with no remaining pending codes. These endpoints are not authenticated; restrict network access accordingly.
+
+The analytics endpoint includes completed receipts only. All-time and 12-month totals remain separated by currency; product summaries cover the shared receipt history.
 
 ## Database migrations
 

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { apiRequest } from "./api";
 import {
-  type Account,
+  type AnalyticsSummary,
   type CandidateResolution,
   type CandidateResolutionResult,
   type CanonicalProduct,
@@ -29,15 +29,12 @@ import {
   Upload,
 } from "lucide-react";
 
-type View = "receipts" | "products";
+type View = "receipts" | "products" | "insights";
 type ApiStatus = "checking" | "available" | "unavailable";
-type AuthStatus = "checking" | "signed-in" | "signed-out";
 
 function App() {
   const [view, setView] = useState<View>("receipts");
   const [apiStatus, setApiStatus] = useState<ApiStatus>("checking");
-  const [authStatus, setAuthStatus] = useState<AuthStatus>("checking");
-  const [account, setAccount] = useState<Account | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [receipts, setReceipts] = useState<ReceiptSummary[]>([]);
@@ -45,9 +42,12 @@ function App() {
   const [candidates, setCandidates] = useState<ProductCodeCandidate[]>([]);
   const [products, setProducts] = useState<CanonicalProduct[]>([]);
   const [productError, setProductError] = useState<string | null>(null);
+  const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [isLoadingCandidates, setIsLoadingCandidates] = useState(false);
   const [resolvingCandidateId, setResolvingCandidateId] = useState<string | null>(null);
   const [isLoadingReceipts, setIsLoadingReceipts] = useState(false);
+  const [isLoadingAnalytics, setIsLoadingAnalytics] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [retailerCode, setRetailerCode] = useState("biedronka");
   const [search, setSearch] = useState("");
@@ -72,20 +72,6 @@ function App() {
       })
       .finally(() => window.clearTimeout(timeoutId));
 
-    apiRequest<Account>("/auth/me")
-      .then((value) => {
-        if (active) {
-          setAccount(value);
-          setAuthStatus("signed-in");
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setAccount(null);
-          setAuthStatus("signed-out");
-        }
-      });
-
     return () => {
       active = false;
       window.clearTimeout(timeoutId);
@@ -98,12 +84,6 @@ function App() {
   );
 
   useEffect(() => {
-    if (authStatus !== "signed-in") {
-      setReceipts([]);
-      hasLoadedReceipts.current = false;
-      return;
-    }
-
     let active = true;
     const refresh = () => {
       if (!hasLoadedReceipts.current) {
@@ -137,10 +117,10 @@ function App() {
         window.clearInterval(intervalId);
       }
     };
-  }, [authStatus, hasActiveReceipts]);
+  }, [hasActiveReceipts]);
 
   useEffect(() => {
-    if (authStatus !== "signed-in" || !account?.is_admin || view !== "products") {
+    if (view !== "products") {
       return;
     }
 
@@ -171,7 +151,37 @@ function App() {
     return () => {
       active = false;
     };
-  }, [account?.is_admin, authStatus, view]);
+  }, [view]);
+
+  useEffect(() => {
+    if (view !== "insights") {
+      return;
+    }
+
+    let active = true;
+    setIsLoadingAnalytics(true);
+    setAnalyticsError(null);
+    apiRequest<AnalyticsSummary>("/analytics")
+      .then((value) => {
+        if (active) {
+          setAnalytics(value);
+        }
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setAnalyticsError(error instanceof Error ? error.message : "Could not load insights.");
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsLoadingAnalytics(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [view]);
 
   function chooseFile(file?: File) {
     if (!file) {
@@ -223,21 +233,6 @@ function App() {
     }
   }
 
-  async function signOut() {
-    try {
-      await apiRequest<{ status: string }>("/auth/logout", { method: "POST" });
-    } catch (error) {
-      setReceiptError(error instanceof Error ? error.message : "Sign-out failed.");
-    } finally {
-      setAccount(null);
-      setAuthStatus("signed-out");
-      hasLoadedReceipts.current = false;
-      setView("receipts");
-      setCandidates([]);
-      setProducts([]);
-    }
-  }
-
   async function resolveCandidate(candidateId: string, resolution: CandidateResolution) {
     setResolvingCandidateId(candidateId);
     setProductError(null);
@@ -271,7 +266,8 @@ function App() {
     }
   }
 
-  const isProducts = view === "products" && account?.is_admin === true;
+  const isProducts = view === "products";
+  const isInsights = view === "insights";
 
   return (
     <div className="app-shell">
@@ -292,28 +288,29 @@ function App() {
         <nav className="nav-list" aria-label="Main navigation">
           <button
             type="button"
-            className={`nav-item ${!isProducts ? "active" : ""}`}
+            className={`nav-item ${view === "receipts" ? "active" : ""}`}
             onClick={() => setView("receipts")}
           >
             <ReceiptText size={18} />
             <span>Receipts</span>
             <span className="nav-count">{receipts.length}</span>
           </button>
-          {account?.is_admin && (
-            <button
-              type="button"
-              className={`nav-item ${isProducts ? "active" : ""}`}
-              onClick={() => setView("products")}
-            >
-              <PackageCheck size={18} />
-              <span>Product review</span>
-              <span className="nav-count">{candidates.length}</span>
-            </button>
-          )}
-          <button type="button" className="nav-item muted-item" disabled>
+          <button
+            type="button"
+            className={`nav-item ${isProducts ? "active" : ""}`}
+            onClick={() => setView("products")}
+          >
+            <PackageCheck size={18} />
+            <span>Product review</span>
+            <span className="nav-count">{candidates.length}</span>
+          </button>
+          <button
+            type="button"
+            className={`nav-item ${isInsights ? "active" : ""}`}
+            onClick={() => setView("insights")}
+          >
             <LayoutDashboard size={18} />
             <span>Insights</span>
-            <span className="soon-tag">SOON</span>
           </button>
         </nav>
 
@@ -322,20 +319,18 @@ function App() {
             <span className="tip-icon"><Sparkles size={16} /></span>
             <strong>Good to know</strong>
             <p>Product codes are reviewed once, then matched automatically next time.</p>
-            {account?.is_admin && (
-              <button type="button" onClick={() => setView("products")}>
-                How review works <ArrowRight size={14} />
-              </button>
-            )}
+            <button type="button" onClick={() => setView("products")}>
+              How review works <ArrowRight size={14} />
+            </button>
           </div>
           <button className="nav-item footer-link" type="button" disabled>
             <Settings2 size={17} /><span>Settings</span>
           </button>
           <div className="user-row">
-            <span className="user-avatar">{account?.display_name?.[0]?.toUpperCase() ?? "U"}</span>
+            <span className="user-avatar">L</span>
             <span className="user-label">
-              {account?.display_name ?? "Your account"}
-              <small>{account?.email ?? (authStatus === "checking" ? "Checking sign-in" : "Not signed in")}</small>
+              Local app
+              <small>Network access only</small>
             </span>
             <CircleHelp size={17} className="muted-icon" />
           </div>
@@ -346,7 +341,7 @@ function App() {
         <header className="topbar">
           <div className="breadcrumbs">
             <span>Workspace</span><span className="crumb-slash">/</span>
-            <strong>{isProducts ? "Product review" : "Receipts"}</strong>
+            <strong>{isProducts ? "Product review" : isInsights ? "Insights" : "Receipts"}</strong>
           </div>
           <div className="topbar-right">
             <div className={`connection-status ${apiStatus}`}>
@@ -354,10 +349,7 @@ function App() {
               {apiStatus === "checking" ? "Checking API" : apiStatus === "available" ? "API connected" : "API not connected"}
             </div>
             <button className="help-button" type="button" aria-label="Help"><CircleHelp size={18} /></button>
-            {authStatus === "signed-in" && (
-              <button className="sign-out-button" type="button" onClick={signOut}>Sign out</button>
-            )}
-            <span className="top-avatar">{account?.display_name?.[0]?.toUpperCase() ?? "U"}</span>
+            <span className="top-avatar">L</span>
           </div>
         </header>
 
@@ -372,6 +364,13 @@ function App() {
               isLoading={isLoadingCandidates}
               resolvingCandidateId={resolvingCandidateId}
               onResolve={resolveCandidate}
+              onAddReceipt={() => setView("receipts")}
+            />
+          ) : isInsights ? (
+            <Insights
+              analytics={analytics}
+              error={analyticsError}
+              isLoading={isLoadingAnalytics}
               onAddReceipt={() => setView("receipts")}
             />
           ) : (
@@ -395,8 +394,6 @@ function App() {
               receipts={receipts}
               isLoadingReceipts={isLoadingReceipts}
               receiptError={receiptError}
-              authStatus={authStatus}
-              account={account}
               apiStatus={apiStatus}
             />
           )}
@@ -419,8 +416,6 @@ type ReceiptsProps = {
   receipts: ReceiptSummary[];
   isLoadingReceipts: boolean;
   receiptError: string | null;
-  authStatus: AuthStatus;
-  account: Account | null;
   apiStatus: ApiStatus;
 };
 
@@ -437,8 +432,6 @@ function Receipts({
   receipts,
   isLoadingReceipts,
   receiptError,
-  authStatus,
-  account,
   apiStatus,
 }: ReceiptsProps) {
   const totalSpent = receipts.reduce(
@@ -462,7 +455,7 @@ function Receipts({
       </div>
 
       <div className="stats-row">
-        <StatCard label="RECEIPTS ADDED" value={String(receipts.length)} detail="In your account" icon={<ReceiptText size={17} />} />
+        <StatCard label="RECEIPTS ADDED" value={String(receipts.length)} detail="In this app" icon={<ReceiptText size={17} />} />
         <StatCard label="TOTAL SPENT" value={`${totalSpent.toFixed(2)} PLN`} detail="From processed receipts" icon={<ArrowDownToLine size={17} />} />
         <StatCard label="DISCOUNTS FOUND" value={`${totalDiscounts.toFixed(2)} PLN`} detail="From processed receipts" icon={<PackageCheck size={17} />} />
       </div>
@@ -512,29 +505,18 @@ function Receipts({
             accept={retailerCode === "biedronka" ? ".pdf,application/pdf" : ".png,image/png"}
             onChange={(event) => onChooseFile(event.target.files?.[0])}
           />
-          {authStatus === "signed-in" ? (
-            <div className="upload-actions">
-              <button className="primary-button" type="button" onClick={() => fileInput.current?.click()} disabled={isUploading}>
-                <Upload size={16} /> Choose a file
+          <div className="upload-actions">
+            <button className="primary-button" type="button" onClick={() => fileInput.current?.click()} disabled={isUploading}>
+              <Upload size={16} /> Choose a file
+            </button>
+            {file && (
+              <button className="primary-button" type="button" onClick={onUpload} disabled={isUploading || apiStatus !== "available"}>
+                <ArrowRight size={16} /> {isUploading ? "Uploading…" : "Upload receipt"}
               </button>
-              {file && (
-                <button className="primary-button" type="button" onClick={onUpload} disabled={isUploading || apiStatus !== "available"}>
-                  <ArrowRight size={16} /> {isUploading ? "Uploading…" : "Upload receipt"}
-                </button>
-              )}
-            </div>
-          ) : authStatus === "checking" ? (
-            <span className="file-hint">Checking sign-in…</span>
-          ) : (
-            <a className="primary-button sign-in-button" href="/api/auth/google/login">
-              <ShieldCheck size={16} /> Sign in with Google
-            </a>
-          )}
+            )}
+          </div>
           <span className="file-hint"><ShieldCheck size={14} /> {retailerCode === "biedronka" ? "PDF" : "PNG"} · up to 10 MB</span>
           {fileError && <span className="file-error" role="alert">{fileError}</span>}
-          {authStatus === "signed-in" && account?.email && (
-            <span className="file-hint">Signed in as {account.email}</span>
-          )}
         </div>
         <div className="upload-side-note">
           <span className="note-icon"><Sparkles size={16} /></span>
@@ -554,14 +536,10 @@ function Receipts({
         <span className="notice-icon"><CircleHelp size={16} /></span>
         <p>
           {apiStatus === "available"
-            ? authStatus === "signed-in"
-              ? "Your uploads are private to your account. Processing status will update here."
-              : "Sign in with an invited Google account to view and upload private receipts."
+            ? "No login is required. Anyone who can reach this app can view and change its receipt data."
             : "The API is unavailable. Try again when the service is ready."}
         </p>
-        {authStatus === "signed-in" && (
-          <button type="button" onClick={() => fileInput.current?.click()}>Select a file <ArrowRight size={14} /></button>
-        )}
+        <button type="button" onClick={() => fileInput.current?.click()}>Select a file <ArrowRight size={14} /></button>
       </div>
 
       <div className="section-title-row history-title">
@@ -574,8 +552,8 @@ function Receipts({
       ) : receipts.length === 0 ? (
         <div className="empty-table">
           <div className="empty-icon"><ReceiptText size={21} /></div>
-          <strong>{authStatus === "signed-in" ? "No receipts yet" : "Sign in to see receipts"}</strong>
-          <span>{authStatus === "signed-in" ? "Choose a PDF or PNG above to get started." : "Your receipt history is private to your account."}</span>
+          <strong>No receipts yet</strong>
+          <span>Choose a PDF or PNG above to get started.</span>
         </div>
       ) : (
         <div className="receipt-list">
@@ -607,6 +585,172 @@ function Receipts({
       <div className="page-footnote">Receipt Tracker <span>·</span> built for clear, simple spending records</div>
     </>
   );
+}
+
+function Insights({
+  analytics,
+  error,
+  isLoading,
+  onAddReceipt,
+}: {
+  analytics: AnalyticsSummary | null;
+  error: string | null;
+  isLoading: boolean;
+  onAddReceipt: () => void;
+}) {
+  return (
+    <>
+      <div className="page-heading">
+        <div>
+          <div className="eyebrow"><span className="eyebrow-mark" /> YOUR SPENDING</div>
+          <h1>Insights, <span>made from your receipts.</span></h1>
+          <p>Completed receipts only. Each currency is reported separately.</p>
+        </div>
+      </div>
+
+      {error && <div className="file-error" role="alert">{error}</div>}
+      {isLoading && !analytics ? (
+        <div className="insights-empty" role="status"><strong>Loading your insights…</strong></div>
+      ) : !analytics ? (
+        <div className="insights-empty">
+          <div className="empty-icon"><LayoutDashboard size={21} /></div>
+          <strong>Insights are unavailable</strong>
+          <span>Try opening this page again in a moment.</span>
+        </div>
+      ) : analytics.currency_totals.length === 0 ? (
+        <div className="insights-empty">
+          <div className="empty-icon"><LayoutDashboard size={21} /></div>
+          <strong>No completed receipts yet</strong>
+          <span>Spending trends will appear after a receipt has been processed and reviewed.</span>
+          <button className="secondary-button" type="button" onClick={onAddReceipt}>
+            <Plus size={15} /> Add a receipt <ArrowRight size={14} />
+          </button>
+        </div>
+      ) : (
+        <>
+          <section className="insights-currency-grid" aria-label="All-time totals">
+            {analytics.currency_totals.map((total) => (
+              <article className="insights-currency-card" key={total.currency}>
+                <div className="insights-card-heading">
+                  <span>{total.currency} · ALL TIME</span>
+                  <ReceiptText size={17} />
+                </div>
+                <strong>{formatAmount(total.total_paid, total.currency)}</strong>
+                <div className="insights-card-details">
+                  <span><PackageCheck size={14} /> Discounts {formatAmount(total.discount_total, total.currency)}</span>
+                  <span><ReceiptText size={14} /> {total.receipt_count} completed {total.receipt_count === 1 ? "receipt" : "receipts"}</span>
+                </div>
+              </article>
+            ))}
+          </section>
+
+          <section className="insights-panel">
+            <div className="section-title-row">
+              <div><h2>Monthly spending</h2><p>Receipt totals for the last 12 months</p></div>
+              <span className="period-pill"><Clock3 size={14} /> 12 months</span>
+            </div>
+            <div className="insights-charts">
+              {analytics.currency_totals.map((total) => (
+                <MonthlySpendChart
+                  key={total.currency}
+                  currency={total.currency}
+                  months={analytics.monthly_totals.filter((month) => month.currency === total.currency)}
+                />
+              ))}
+            </div>
+          </section>
+
+          <section className="insights-panel">
+            <div className="section-title-row">
+              <div><h2>Frequently purchased products</h2><p>Ranked by receipt-line appearances across completed receipts</p></div>
+            </div>
+            {analytics.top_products.length === 0 ? (
+              <div className="insights-table-empty">No product lines are available yet.</div>
+            ) : (
+              <div className="insights-table-wrap">
+                <table className="insights-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Product code</th>
+                      <th scope="col">Unit</th>
+                      <th scope="col">Receipt lines</th>
+                      <th scope="col">Quantity</th>
+                      <th scope="col">Discounts</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {analytics.top_products.map((product) => (
+                      <tr key={`${product.product_code}-${product.unit ?? ""}-${product.currency}`}>
+                        <td><strong>{product.product_code}</strong></td>
+                        <td>{product.unit ?? "—"}</td>
+                        <td>{product.purchase_lines} · {product.receipt_count} {product.receipt_count === 1 ? "receipt" : "receipts"}</td>
+                        <td>{Number(product.quantity).toLocaleString(undefined, { maximumFractionDigits: 3 })} {product.unit ?? ""}</td>
+                        <td>{formatAmount(product.discount_total, product.currency)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        </>
+      )}
+      <div className="page-footnote">Only your own completed receipts are included <span>·</span> currencies are never combined</div>
+    </>
+  );
+}
+
+function MonthlySpendChart({
+  currency,
+  months,
+}: {
+  currency: string;
+  months: AnalyticsSummary["monthly_totals"];
+}) {
+  const maximum = Math.max(...months.map((month) => Number(month.total_paid)), 0);
+  const chartDescription = months
+    .map((month) => `${month.month}: ${formatAmount(month.total_paid, currency)}`)
+    .join("; ");
+
+  return (
+    <div className="insights-chart">
+      <h3>{currency}</h3>
+      <div
+        className="insights-month-bars"
+        role="img"
+        aria-label={`Monthly spending in ${currency}. ${chartDescription}`}
+      >
+        {months.map((month) => {
+          const amount = Number(month.total_paid);
+          const height = maximum > 0 && amount > 0 ? Math.max((amount / maximum) * 100, 3) : 0;
+          const [year, monthNumber] = month.month.split("-").map(Number);
+          const monthLabel = new Date(year, monthNumber - 1, 15).toLocaleDateString(undefined, {
+            month: "short",
+          });
+          return (
+            <div
+              className="insights-month"
+              key={month.month}
+              title={`${month.month}: ${formatAmount(month.total_paid, currency)}`}
+            >
+              <div className="insights-bar-area">
+                <span className="insights-bar" style={{ height: `${height}%` }} />
+              </div>
+              <span className="insights-month-label">{monthLabel}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function formatAmount(value: string, currency: string): string {
+  const formatted = Number(value).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return `${formatted} ${currency}`;
 }
 
 function ProductReview({
@@ -680,7 +824,7 @@ function ProductReview({
               <Plus size={15} /> Add a receipt <ArrowRight size={14} />
             </button>
           )}
-          <span className="review-empty-foot"><ShieldCheck size={13} /> Only administrators can change the product catalog.</span>
+          <span className="review-empty-foot"><ShieldCheck size={13} /> Anyone who can reach the app can change the product catalog.</span>
         </div>
       ) : (
         <div className="candidate-list">

@@ -1,10 +1,3 @@
-export type Account = {
-  id: string;
-  email: string | null;
-  display_name: string | null;
-  is_admin: boolean;
-};
-
 export type ReceiptSummary = {
   id: string;
   retailer_code: string;
@@ -19,6 +12,33 @@ export type ReceiptSummary = {
   created_at: string | null;
   stage: string | null;
   error: string | null;
+};
+
+export type AnalyticsCurrencyTotal = {
+  currency: string;
+  receipt_count: number;
+  total_paid: string;
+  discount_total: string;
+};
+
+export type AnalyticsMonthTotal = AnalyticsCurrencyTotal & {
+  month: string;
+};
+
+export type AnalyticsTopProduct = {
+  product_code: string;
+  unit: string | null;
+  currency: string;
+  purchase_lines: number;
+  receipt_count: number;
+  quantity: string;
+  discount_total: string;
+};
+
+export type AnalyticsSummary = {
+  currency_totals: AnalyticsCurrencyTotal[];
+  monthly_totals: AnalyticsMonthTotal[];
+  top_products: AnalyticsTopProduct[];
 };
 
 export type ProductCodeCandidate = {

@@ -21,9 +21,9 @@ k3s on one server (16 GB RAM, 4 Intel i5 cores)
   └─ Existing Argo CD and monitoring
 ```
 
-The application backend is Python with FastAPI; the frontend is React and TypeScript. The app implements invite-only Google sign-in, receipt upload/history, background processing, and administrator product-code review. Insights and Metabase embedding remain future work.
+The application backend is Python with FastAPI; the frontend is React and TypeScript. The app implements receipt upload/history, background processing, product-code review, and an Insights dashboard. Metabase embedding remains future work.
 
-The app supports separate user accounts with invite-only Google sign-in. Receipts are private to the account that uploaded them, and owner-scoped receipt APIs enforce that boundary. PostgreSQL is hosted externally as a SaaS; it is not deployed on the k3s server.
+The app currently has no application-level authentication or user-level data separation. PostgreSQL retains owner IDs for future multi-user support, but every device that can reach the app can access all receipts and product-review features. PostgreSQL is hosted externally as a SaaS; it is not deployed on the k3s server.
 
 ## Receipt ingestion and processing
 
@@ -36,11 +36,11 @@ The app supports separate user accounts with invite-only Google sign-in. Receipt
 
 ## Product catalog and admin review
 
-The admin/review interface is a protected section of the existing frontend, backed by authorized API endpoints. It does not need to be a separate microservice. Only designated administrators can resolve product-code candidates.
+The product-review interface is a section of the existing frontend, backed by API endpoints. It does not need to be a separate microservice. In the current no-login mode, anyone who can reach the app can resolve product-code candidates.
 
 Products are identified only by short codes; there is no separate full name or display name. Keep the raw product code extracted from each receipt separate from the canonical product catalog. When an unrecognized code appears, create or find a deduplicated pending candidate and show it in the admin queue. For example, `LechHvdrFree` could be reviewed and mapped to the accepted canonical product code `LechHydrFree`.
 
-For each pending candidate, an administrator can:
+For each pending candidate, the operator can:
 
 1. Accept the extracted code as a new canonical product code.
 2. Edit the code and create an accepted canonical product with that code.
@@ -48,14 +48,14 @@ For each pending candidate, an administrator can:
 
 Record the decision as a reusable code mapping, so later receipts with the same misspelling resolve automatically rather than creating another pending product. Preserve the original receipt code for traceability. Pending codes should not be treated as confirmed catalog products in reports; the UI should make unreviewed receipt items visible.
 
-The initial schema separates canonical `products` (with a `code`) from reusable `product_code_candidates` (with the observed code). A candidate has a unique normalized code, a `pending` or `resolved` status, and (once resolved) a link to the canonical product plus the resolution type. Receipt items retain their raw codes and may link to both the candidate and canonical product. This avoids overwriting the original spelling when an administrator corrects or maps it.
+The initial schema separates canonical `products` (with a `code`) from reusable `product_code_candidates` (with the observed code). A candidate has a unique normalized code, a `pending` or `resolved` status, and (once resolved) a link to the canonical product plus the resolution type. Receipt items retain their raw codes and may link to both the candidate and canonical product. This avoids overwriting the original spelling when the operator corrects or maps it.
 
 ## Authentication, privacy, and third-party APIs
 
-- Use Google sign-in without requesting access to Gmail. Keep invite-only registration as the initial access model.
-- The API must enforce account and admin authorization on every request; do not trust user IDs or product decisions supplied by the browser.
+- The app has no application login. Restrict access at the network layer with firewall, VPN, or network policy; every reachable user can read and modify app data.
+- The `PUBLIC_APP_ORIGIN` check on browser writes is not an authentication boundary and does not protect API access from other clients.
 - Treat receipt images, extracted text, and purchase details as sensitive. Sending files/text to Mistral and an LLM provider means those providers process the data. Before implementation, review their retention, training, region, and data-processing terms and choose providers/settings appropriate for the app's users.
-- Keep OAuth credentials, PostgreSQL credentials, session-signing secrets, and OCR/LLM API keys out of source control and frontend bundles. Store them as runtime secrets; encrypted GitOps secrets need a decryption key kept outside the repository.
+- Keep PostgreSQL credentials and OCR/LLM API keys out of source control and frontend bundles. Store them as runtime secrets; encrypted GitOps secrets need a decryption key kept outside the repository.
 - Use TLS for PostgreSQL and API connections; use a least-privilege application database role. Keep uploaded files private, define retention/deletion behavior, and encrypt off-server backups.
 - Avoid logging receipt contents, extracted text, API keys, access tokens, or unnecessary personal information.
 
@@ -73,7 +73,7 @@ The 16 GB / 4-core server also runs k3s, Argo CD, monitoring, the app, and Metab
 
 1. **Samples and locale:** Obtain representative Lidl PNGs and Biedronka PDFs, including misspellings and discounts. Confirm the receipt language/locale and how it appears in the OCR output.
 2. **LLM provider:** Mistral is selected for OCR and extraction. Confirm the model, data-retention settings, and acceptable cost; still validate all output server-side.
-3. **Product review permissions:** Identify which account(s) should have administrator privileges. Decide whether every new spelling should be reviewed or whether confident/known aliases may resolve automatically.
+3. **Product review permissions:** If app-level authentication is introduced later, decide which accounts should be able to review product codes.
 4. **Dashboard visibility:** Decide whether dashboards are shared across users or per-user before embedding.
 5. **File retention and storage:** Confirm how long originals are retained, whether local k3s persistent storage is acceptable, and where encrypted backups will live.
 6. **External PostgreSQL SaaS:** Confirm provider, TLS/network restrictions, backup/restore expectations, and data region.
@@ -83,8 +83,8 @@ The 16 GB / 4-core server also runs k3s, Argo CD, monitoring, the app, and Metab
 
 1. **Validate samples and providers:** Inspect real receipt files and OCR Markdown; choose the LLM API and review external data handling terms.
 2. **Foundation:** Configure ingress/TLS, runtime secrets, private file storage, external PostgreSQL access, and backup/monitoring checks.
-3. **Identity and schema:** Implement Google sign-in/invitations and schema for receipts, receipt items/discounts, canonical products, aliases/review candidates, and processing jobs.
+3. **Identity and schema:** Use the existing owner IDs as a future multi-user extension point; the initial app does not authenticate users.
 4. **Ingestion pipeline:** Add PDF/PNG upload, Mistral OCR, LLM structured extraction, schema validation, retries/idempotency, and visible processing errors.
-5. **Product review:** Add an admin-only candidate queue to accept, edit, or map observed product codes; persist mappings for future receipts.
+5. **Product review:** Add a candidate queue to accept, edit, or map observed product codes; persist mappings for future receipts.
 6. **User interface and BI:** Build upload/status/history screens, then add private Metabase access and embedding only after dashboard visibility is settled.
-7. **Validate and operate:** Test representative receipts, misspelling resolution, authorization boundaries, provider failures, restore procedures, and resource limits. Add Biedronka JSON ingestion once real examples and their schema are available.
+7. **Validate and operate:** Test representative receipts, misspelling resolution, network restrictions, provider failures, restore procedures, and resource limits. Add Biedronka JSON ingestion once real examples and their schema are available.

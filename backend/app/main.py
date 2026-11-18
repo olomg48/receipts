@@ -5,17 +5,15 @@ import os
 import re
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import PurePosixPath
 
-from authlib.integrations.starlette_client import OAuth
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from minio.error import S3Error
 from sqlalchemy import func, select
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
-from starlette.middleware.sessions import SessionMiddleware
-from starlette.responses import RedirectResponse
 from urllib3.exceptions import HTTPError as Urllib3Error
 
 from app.db import (
@@ -24,7 +22,6 @@ from app.db import (
     get_db_session,
 )
 from app.models import (
-    AuthIdentity,
     Product,
     ProductCodeCandidate,
     Receipt,
@@ -46,24 +43,6 @@ from app.storage import (
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="Receipt Tracker API", version="0.2.0")
-session_secret = os.getenv("SESSION_SECRET")
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=session_secret or "authentication-is-not-configured",
-    max_age=8 * 60 * 60,
-    same_site="lax",
-    https_only=os.getenv("SESSION_COOKIE_SECURE", "true").lower() == "true",
-)
-
-oauth = OAuth()
-if os.getenv("GOOGLE_CLIENT_ID") and os.getenv("GOOGLE_CLIENT_SECRET"):
-    oauth.register(
-        name="google",
-        client_id=os.environ["GOOGLE_CLIENT_ID"],
-        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
-        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-        client_kwargs={"scope": "openid email profile"},
-    )
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 ALLOWED_UPLOADS = {
@@ -78,23 +57,6 @@ def _configured(name: str) -> str | None:
     return value.strip() if value and value.strip() else None
 
 
-def _require_auth_configuration() -> None:
-    required = (
-        "SESSION_SECRET",
-        "GOOGLE_CLIENT_ID",
-        "GOOGLE_CLIENT_SECRET",
-        "GOOGLE_REDIRECT_URI",
-        "PUBLIC_APP_ORIGIN",
-    )
-    if any(not _configured(name) for name in required) or not _allowed_emails(
-        "INVITED_EMAILS"
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Google sign-in is not configured",
-        )
-
-
 def _require_same_origin(request: Request) -> None:
     expected_origin = _configured("PUBLIC_APP_ORIGIN")
     supplied_origin = request.headers.get("origin")
@@ -105,45 +67,15 @@ def _require_same_origin(request: Request) -> None:
         )
 
 
-def _allowed_emails(name: str) -> set[str]:
-    return {
-        email.strip().casefold()
-        for email in os.getenv(name, "").split(",")
-        if email.strip()
-    }
-
-
-def get_current_user(
-    request: Request,
-    session: Session = Depends(get_db_session),
-) -> User:
-    if not _configured("SESSION_SECRET"):
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authentication is not configured",
-        )
-    user_id = request.session.get("user_id")
-    if not isinstance(user_id, str):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign-in required")
-    try:
-        parsed_user_id = uuid.UUID(user_id)
-    except ValueError:
-        request.session.clear()
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign-in required") from None
-
-    user = session.get(User, parsed_user_id)
+def _get_single_owner(session: Session) -> User:
+    email = (_configured("SINGLE_USER_EMAIL") or "owner@local").casefold()
+    user = session.scalar(select(User).where(func.lower(User.email) == email))
     if user is None:
-        request.session.clear()
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign-in required")
-    return user
-
-
-def get_current_admin(user: User = Depends(get_current_user)) -> User:
-    if not user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Administrator access required",
-        )
+        user = User(email=email, display_name="Owner", is_admin=True)
+        session.add(user)
+        session.flush()
+    elif not user.is_admin:
+        user.is_admin = True
     return user
 
 
@@ -192,120 +124,6 @@ def readiness() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/auth/google/login", tags=["auth"])
-async def google_login(request: Request):
-    _require_auth_configuration()
-    client = oauth.create_client("google")
-    if client is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Google sign-in is not configured",
-        )
-    return await client.authorize_redirect(request, _configured("GOOGLE_REDIRECT_URI"))
-
-
-@app.get("/auth/google/callback", tags=["auth"])
-async def google_callback(
-    request: Request,
-    session: Session = Depends(get_db_session),
-):
-    _require_auth_configuration()
-    client = oauth.create_client("google")
-    if client is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Google sign-in is not configured",
-        )
-
-    token = await client.authorize_access_token(request)
-    userinfo = token.get("userinfo") or await client.userinfo(token=token)
-
-    email = userinfo.get("email")
-    subject = userinfo.get("sub")
-    issuer = userinfo.get("iss") or "https://accounts.google.com"
-    if (
-        not isinstance(email, str)
-        or not isinstance(subject, str)
-        or userinfo.get("email_verified") is not True
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Google did not provide a verified account",
-        )
-
-    normalized_email = email.casefold()
-    allowed = _allowed_emails("INVITED_EMAILS")
-    if normalized_email not in allowed:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This account has not been invited",
-        )
-
-    identity = session.scalar(
-        select(AuthIdentity).where(
-            AuthIdentity.issuer == issuer,
-            AuthIdentity.subject == subject,
-        )
-    )
-    if identity is not None:
-        user = session.get(User, identity.user_id)
-        if user is None:
-            logger.error("Google identity %s has no linked user", subject)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Account could not be loaded",
-            )
-    else:
-        user = session.scalar(
-            select(User).where(func.lower(User.email) == normalized_email)
-        )
-        if user is None:
-            user = User(
-                email=email,
-                display_name=userinfo.get("name"),
-                is_admin=normalized_email in _allowed_emails("ADMIN_EMAILS"),
-            )
-            session.add(user)
-            session.flush()
-        session.add(
-            AuthIdentity(
-                user_id=user.id,
-                issuer=issuer,
-                subject=subject,
-            )
-        )
-        try:
-            session.commit()
-        except SQLAlchemyError:
-            session.rollback()
-            logger.exception("Failed to persist Google identity")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Account could not be saved",
-            ) from None
-
-    request.session.clear()
-    request.session["user_id"] = str(user.id)
-    return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-
-
-@app.get("/auth/me", tags=["auth"])
-def current_account(user: User = Depends(get_current_user)) -> dict[str, str | bool | None]:
-    return {
-        "id": str(user.id),
-        "email": user.email,
-        "display_name": user.display_name,
-        "is_admin": user.is_admin,
-    }
-
-
-@app.post("/auth/logout", tags=["auth"])
-def logout(request: Request, _: User = Depends(get_current_user)) -> dict[str, str]:
-    _require_same_origin(request)
-    request.session.clear()
-    return {"status": "ok"}
-
-
 def _safe_filename(filename: str | None) -> str:
     leaf = (filename or "receipt").replace("\\", "/").split("/")[-1].strip()
     sanitized = SAFE_FILENAME.sub("_", leaf).strip(" .")
@@ -351,7 +169,6 @@ def upload_receipt(
     request: Request,
     file: UploadFile = File(...),
     retailer_code: str = Form(...),
-    user: User = Depends(get_current_user),
     session: Session = Depends(get_db_session),
 ) -> dict[str, str]:
     _require_same_origin(request)
@@ -366,6 +183,7 @@ def upload_receipt(
             detail="Unsupported retailer",
         )
 
+    user = _get_single_owner(session)
     receipt_id = uuid.uuid4()
     storage_key = f"receipts/{receipt_id}/original{PurePosixPath(filename).suffix.lower()}"
     try:
@@ -412,7 +230,6 @@ def upload_receipt(
 
 @app.get("/receipts", tags=["receipts"])
 def list_receipts(
-    user: User = Depends(get_current_user),
     session: Session = Depends(get_db_session),
 ) -> list[dict[str, object]]:
     rows = session.execute(
@@ -426,7 +243,6 @@ def list_receipts(
         )
         .join(Retailer, Receipt.retailer_id == Retailer.id)
         .outerjoin(ReceiptJob, ReceiptJob.receipt_id == Receipt.id)
-        .where(Receipt.uploaded_by_id == user.id)
         .order_by(Receipt.created_at.desc())
         .limit(100)
     ).all()
@@ -452,18 +268,157 @@ def list_receipts(
     ]
 
 
+@app.get("/analytics", tags=["analytics"])
+def receipt_analytics(
+    session: Session = Depends(get_db_session),
+) -> dict[str, object]:
+    currency_rows = session.execute(
+        select(
+            Receipt.currency,
+            func.count(Receipt.id),
+            func.coalesce(func.sum(Receipt.total_paid), 0),
+            func.coalesce(func.sum(Receipt.discount_total), 0),
+        )
+        .where(Receipt.status == "complete")
+        .group_by(Receipt.currency)
+        .order_by(Receipt.currency)
+    ).all()
+    currencies = [row[0] for row in currency_rows]
+    currency_totals = [
+        {
+            "currency": currency,
+            "receipt_count": receipt_count,
+            "total_paid": _money_text(total_paid),
+            "discount_total": _money_text(discount_total),
+        }
+        for currency, receipt_count, total_paid, discount_total in currency_rows
+    ]
+
+    now = datetime.now(timezone.utc)
+    current_month_index = now.year * 12 + now.month - 1
+    month_keys = []
+    for month_index in range(current_month_index - 11, current_month_index + 1):
+        year, month = divmod(month_index, 12)
+        month_keys.append(f"{year:04d}-{month + 1:02d}")
+    first_month_year, first_month = divmod(current_month_index - 11, 12)
+    period_start = datetime(first_month_year, first_month + 1, 1, tzinfo=timezone.utc)
+    next_month_year, next_month = divmod(current_month_index + 1, 12)
+    period_end = datetime(next_month_year, next_month + 1, 1, tzinfo=timezone.utc)
+    activity_date = func.coalesce(Receipt.purchased_at, Receipt.created_at)
+    recent_receipts = session.execute(
+        select(
+            Receipt.currency,
+            Receipt.purchased_at,
+            Receipt.created_at,
+            Receipt.total_paid,
+            Receipt.discount_total,
+        ).where(
+            Receipt.status == "complete",
+            activity_date >= period_start,
+            activity_date < period_end,
+        )
+    ).all()
+
+    monthly_buckets: dict[tuple[str, str], tuple[int, Decimal, Decimal]] = {
+        (month, currency): (0, Decimal("0"), Decimal("0"))
+        for month in month_keys
+        for currency in currencies
+    }
+    for receipt in recent_receipts:
+        purchased_at = receipt.purchased_at or receipt.created_at
+        if purchased_at is None:
+            raise RuntimeError("A completed receipt has no purchase or creation date")
+        if purchased_at.tzinfo is None:
+            purchased_at = purchased_at.replace(tzinfo=timezone.utc)
+        else:
+            purchased_at = purchased_at.astimezone(timezone.utc)
+        month = purchased_at.strftime("%Y-%m")
+        key = (month, receipt.currency)
+        receipt_count, total_paid, discount_total = monthly_buckets[key]
+        monthly_buckets[key] = (
+            receipt_count + 1,
+            total_paid + Decimal(str(receipt.total_paid or 0)),
+            discount_total + Decimal(str(receipt.discount_total or 0)),
+        )
+
+    monthly_totals = []
+    for month in month_keys:
+        for currency in currencies:
+            receipt_count, total_paid, discount_total = monthly_buckets[(month, currency)]
+            monthly_totals.append(
+                {
+                    "month": month,
+                    "currency": currency,
+                    "receipt_count": receipt_count,
+                    "total_paid": _money_text(total_paid),
+                    "discount_total": _money_text(discount_total),
+                }
+            )
+
+    product_code = func.coalesce(Product.code, ReceiptItem.raw_product_code)
+    product_rows = session.execute(
+        select(
+            product_code.label("product_code"),
+            ReceiptItem.unit,
+            Receipt.currency,
+            func.count(ReceiptItem.id).label("purchase_lines"),
+            func.count(func.distinct(Receipt.id)).label("receipt_count"),
+            func.sum(ReceiptItem.quantity).label("quantity"),
+            func.coalesce(func.sum(ReceiptItem.discount_amount), 0).label(
+                "discount_total"
+            ),
+        )
+        .select_from(ReceiptItem)
+        .join(Receipt, Receipt.id == ReceiptItem.receipt_id)
+        .outerjoin(Product, Product.id == ReceiptItem.product_id)
+        .where(Receipt.status == "complete")
+        .group_by(product_code, ReceiptItem.unit, Receipt.currency)
+        .order_by(
+            func.count(ReceiptItem.id).desc(),
+            product_code,
+            ReceiptItem.unit,
+            Receipt.currency,
+        )
+        .limit(10)
+    ).all()
+
+    return {
+        "currency_totals": currency_totals,
+        "monthly_totals": monthly_totals,
+        "top_products": [
+            {
+                "product_code": code,
+                "unit": unit,
+                "currency": currency,
+                "purchase_lines": purchase_lines,
+                "receipt_count": receipt_count,
+                "quantity": str(quantity or Decimal("0")),
+                "discount_total": _money_text(discount_total),
+            }
+            for (
+                code,
+                unit,
+                currency,
+                purchase_lines,
+                receipt_count,
+                quantity,
+                discount_total,
+            ) in product_rows
+        ],
+    }
+
+
+def _money_text(value: Decimal | int | float | None) -> str:
+    amount = Decimal(str(value if value is not None else "0"))
+    return format(amount.quantize(Decimal("0.01")), ".2f")
+
+
 @app.get("/receipts/{receipt_id}", tags=["receipts"])
 def get_receipt(
     receipt_id: uuid.UUID,
-    user: User = Depends(get_current_user),
     session: Session = Depends(get_db_session),
 ) -> dict[str, str | None]:
-    receipt = session.scalar(
-        select(Receipt).where(
-            Receipt.id == receipt_id,
-            Receipt.uploaded_by_id == user.id,
-        )
-    )
+    receipt = session.scalar(select(Receipt).where(Receipt.id == receipt_id))
     if receipt is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found")
 
@@ -482,7 +437,6 @@ def get_receipt(
 
 @app.get("/admin/product-candidates", tags=["products"])
 def list_product_candidates(
-    _: User = Depends(get_current_admin),
     session: Session = Depends(get_db_session),
 ) -> list[dict[str, object]]:
     occurrence_count = (
@@ -508,7 +462,6 @@ def list_product_candidates(
 
 @app.get("/admin/products", tags=["products"])
 def list_products(
-    _: User = Depends(get_current_admin),
     session: Session = Depends(get_db_session),
 ) -> list[dict[str, str]]:
     products = session.scalars(select(Product).order_by(Product.code, Product.id)).all()
@@ -520,10 +473,10 @@ def resolve_product_candidate(
     candidate_id: uuid.UUID,
     request: Request,
     resolution: ResolveProductCandidateRequest,
-    user: User = Depends(get_current_admin),
     session: Session = Depends(get_db_session),
 ) -> dict[str, str]:
     _require_same_origin(request)
+    user = _get_single_owner(session)
     candidate = session.scalar(
         select(ProductCodeCandidate)
         .where(ProductCodeCandidate.id == candidate_id)

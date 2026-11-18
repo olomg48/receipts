@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+from decimal import Decimal
 import uuid
 
 import pytest
@@ -22,6 +24,7 @@ from app.models import (
 @pytest.fixture
 def receipt_client(monkeypatch):
     monkeypatch.setenv("PUBLIC_APP_ORIGIN", "https://receipts.example.test")
+    monkeypatch.setenv("SINGLE_USER_EMAIL", "owner@example.com")
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -46,7 +49,6 @@ def receipt_client(monkeypatch):
             yield session
 
     main.app.dependency_overrides[main.get_db_session] = override_session
-    main.app.dependency_overrides[main.get_current_user] = lambda: owner
     client = TestClient(main.app)
     yield client, engine, owner, other_user
     main.app.dependency_overrides.clear()
@@ -118,7 +120,7 @@ def test_upload_rejects_cross_origin_request(receipt_client, monkeypatch):
     assert stored == []
 
 
-def test_receipt_history_is_scoped_to_signed_in_user(receipt_client):
+def test_receipt_history_includes_all_receipts_for_single_owner(receipt_client):
     client, engine, owner, other_user = receipt_client
     with Session(engine) as session:
         session.add_all(
@@ -144,8 +146,10 @@ def test_receipt_history_is_scoped_to_signed_in_user(receipt_client):
     response = client.get("/receipts")
 
     assert response.status_code == 200
-    assert len(response.json()) == 1
-    assert response.json()[0]["original_filename"] == "mine.pdf"
+    assert {row["original_filename"] for row in response.json()} == {
+        "mine.pdf",
+        "theirs.pdf",
+    }
 
 
 def test_receipt_history_includes_failure_reason(receipt_client):
@@ -179,28 +183,135 @@ def test_receipt_history_includes_failure_reason(receipt_client):
     assert response.json()[0]["error"] == "OCR provider could not be reached"
 
 
-def test_upload_requires_a_session_when_auth_is_configured(
-    receipt_client,
-    monkeypatch,
-):
+def test_analytics_include_all_owners_and_only_completed_receipts(receipt_client):
+    client, engine, owner, other_user = receipt_client
+    purchased_at = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        milk = Product(code="Milk-1L", normalized_code="milk-1l")
+        owner_receipt = Receipt(
+            uploaded_by_id=owner.id,
+            retailer_id=1,
+            original_filename="complete.pdf",
+            storage_key="receipts/complete/original.pdf",
+            purchased_at=purchased_at,
+            currency="PLN",
+            subtotal=Decimal("12.00"),
+            discount_total=Decimal("1.25"),
+            total_paid=Decimal("10.75"),
+            status="complete",
+        )
+        euro_receipt = Receipt(
+            uploaded_by_id=owner.id,
+            retailer_id=2,
+            original_filename="euro.png",
+            storage_key="receipts/euro/original.png",
+            purchased_at=purchased_at,
+            currency="EUR",
+            discount_total=Decimal("0.50"),
+            total_paid=Decimal("4.50"),
+            status="complete",
+        )
+        review_receipt = Receipt(
+            uploaded_by_id=owner.id,
+            retailer_id=1,
+            original_filename="review.pdf",
+            storage_key="receipts/review/original.pdf",
+            purchased_at=purchased_at,
+            total_paid=Decimal("500.00"),
+            status="needs_review",
+        )
+        private_receipt = Receipt(
+            uploaded_by_id=other_user.id,
+            retailer_id=1,
+            original_filename="private.pdf",
+            storage_key="receipts/private/original.pdf",
+            purchased_at=purchased_at,
+            total_paid=Decimal("900.00"),
+            status="complete",
+        )
+        session.add_all((milk, owner_receipt, euro_receipt, review_receipt, private_receipt))
+        session.flush()
+        session.add_all(
+            (
+                ReceiptItem(
+                    receipt_id=owner_receipt.id,
+                    line_number=1,
+                    raw_product_code="Milk-1L",
+                    product_id=milk.id,
+                    quantity=Decimal("2"),
+                    unit="pcs",
+                    discount_amount=Decimal("1.25"),
+                ),
+                ReceiptItem(
+                    receipt_id=review_receipt.id,
+                    line_number=1,
+                    raw_product_code="Unreviewed",
+                    quantity=Decimal("1"),
+                    discount_amount=Decimal("10.00"),
+                ),
+                ReceiptItem(
+                    receipt_id=private_receipt.id,
+                    line_number=1,
+                    raw_product_code="Private",
+                    quantity=Decimal("99"),
+                    discount_amount=Decimal("99.00"),
+                ),
+            )
+        )
+        session.commit()
+
+    response = client.get("/analytics")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["currency_totals"] == [
+        {
+            "currency": "EUR",
+            "receipt_count": 1,
+            "total_paid": "4.50",
+            "discount_total": "0.50",
+        },
+        {
+            "currency": "PLN",
+            "receipt_count": 2,
+            "total_paid": "910.75",
+            "discount_total": "1.25",
+        },
+    ]
+    current_month = purchased_at.strftime("%Y-%m")
+    pln_month = next(
+        row
+        for row in body["monthly_totals"]
+        if row["month"] == current_month and row["currency"] == "PLN"
+    )
+    assert pln_month["receipt_count"] == 2
+    assert pln_month["total_paid"] == "910.75"
+    assert [product["product_code"] for product in body["top_products"]] == [
+        "Milk-1L",
+        "Private",
+    ]
+    assert body["top_products"][0]["purchase_lines"] == 1
+    assert body["top_products"][0]["quantity"] == "2.000"
+    assert body["top_products"][0]["discount_total"] == "1.25"
+
+
+def test_receipt_history_is_available_without_login(receipt_client):
     client, _, _, _ = receipt_client
-    monkeypatch.setenv("SESSION_SECRET", "test-session-secret")
-    main.app.dependency_overrides.pop(main.get_current_user)
-
     response = client.get("/receipts")
+    assert response.status_code == 200
+    assert response.json() == []
 
-    assert response.status_code == 401
 
-
-def test_product_review_endpoints_require_admin(receipt_client):
+def test_product_review_endpoints_are_available_without_login(receipt_client):
     client, _, _, _ = receipt_client
 
     response = client.get("/admin/product-candidates")
 
-    assert response.status_code == 403
+    assert response.status_code == 200
+    assert response.json() == []
 
 
-def test_admin_can_resolve_candidate_and_complete_receipt(receipt_client):
+def test_product_review_resolution_updates_receipt_without_login(receipt_client):
     client, engine, owner, _ = receipt_client
     owner.is_admin = True
     with Session(engine) as session:
