@@ -151,6 +151,10 @@ h1 span { color: #8b9b8d; font-weight: 500; }
 .receipt-back-button { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 22px; padding: 7px 10px; border: 1px solid #e5e8e1; border-radius: 7px; color: #617362; background: #fff; font-size: 10px; font-weight: 600; }
 .receipt-detail-heading { align-items: center; margin-bottom: 20px; }
 .receipt-detail-heading h1 { overflow-wrap: anywhere; }
+.receipt-detail-heading-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.receipt-reprocess-button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid #dfe8dc; border-radius: 6px; color: #507657; background: #f9fbf7; font-size: 9px; font-weight: 600; white-space: nowrap; }
+.receipt-reprocess-button:hover { background: #eef5eb; }
+.receipt-reprocess-button:disabled { opacity: .6; cursor: default; }
 .receipt-detail-totals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 28px; }
 .receipt-detail-totals > div { display: grid; gap: 8px; min-width: 0; padding: 15px 16px; border: 1px solid #eae9e3; border-radius: 9px; background: #fff; }
 .receipt-detail-totals span { color: #92988f; font-size: 9px; }
@@ -279,6 +283,7 @@ h1 span { color: #8b9b8d; font-weight: 500; }
   .receipt-row-total { margin-left: auto; }
   .receipt-details-button { margin-left: 46px; }
   .receipt-detail-heading { align-items: flex-start; }
+  .receipt-detail-heading-actions { align-self: flex-end; }
   .receipt-detail-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
   .receipt-detail-totals > div { padding: 11px; }
   .receipt-detail-totals strong { font-size: 12px; }

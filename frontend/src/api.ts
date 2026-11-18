@@ -31,6 +31,12 @@ export type ReceiptDetail = ReceiptSummary & {
   items: ReceiptLineItem[];
 };
 
+export type ReceiptReprocessResult = {
+  id: string;
+  status: "queued";
+  stage: string | null;
+};
+
 export type AnalyticsCurrencyTotal = {
   currency: string;
   receipt_count: number;

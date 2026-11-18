@@ -482,6 +482,53 @@ def get_receipt(
     }
 
 
+@app.post(
+    "/receipts/{receipt_id}/reprocess",
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["receipts"],
+)
+def reprocess_receipt(
+    receipt_id: uuid.UUID,
+    request: Request,
+    session: Session = Depends(get_db_session),
+) -> dict[str, str | None]:
+    _require_same_origin(request)
+
+    receipt = session.scalar(
+        select(Receipt).where(Receipt.id == receipt_id).with_for_update()
+    )
+    if receipt is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found")
+
+    job = session.scalar(
+        select(ReceiptJob)
+        .where(ReceiptJob.receipt_id == receipt.id)
+        .order_by(ReceiptJob.created_at.desc())
+        .with_for_update()
+        .limit(1)
+    )
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Receipt has no processing job",
+        )
+    if job.status != "failed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only failed receipts can be reprocessed",
+        )
+
+    job.status = "pending"
+    job.attempts = 0
+    job.available_at = datetime.now(timezone.utc)
+    job.locked_until = None
+    job.last_error = None
+    receipt.status = "queued"
+    session.commit()
+
+    return {"id": str(receipt.id), "status": receipt.status, "stage": job.stage}
+
+
 @app.get("/admin/product-candidates", tags=["products"])
 def list_product_candidates(
     session: Session = Depends(get_db_session),

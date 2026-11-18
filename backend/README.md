@@ -6,6 +6,7 @@ The API is a Python 3.12 FastAPI service. Its container exposes:
 - `GET /health/ready` for readiness probes; this checks PostgreSQL and the configured Garage bucket.
 - `POST /receipts` and `GET /receipts` for receipt upload and history.
 - `GET /receipts/{receipt_id}` for receipt details and extracted product lines.
+- `POST /receipts/{receipt_id}/reprocess` to requeue a failed receipt.
 - `GET /analytics` for spending summaries across the single-owner app.
 - Product review endpoints under `/admin/`.
 - `GET /docs` for the interactive API documentation.
@@ -43,6 +44,8 @@ The app has no application-level login or user-level data separation. Anyone who
 Run the API as the container's default command. Run the same image as a separate worker process with `python -m app.worker`; only the worker needs the Mistral API key. Keep secrets in the runtime secret manager.
 
 The readiness endpoint returns `503` until both PostgreSQL and the configured Garage bucket are reachable using the app-specific S3 credentials. The worker also verifies bucket access before starting its processing loop.
+
+Reprocessing is available only for failed receipts and requires the configured same-origin header. It resets the existing job's attempts and error state while preserving its stage and artifact keys, so a failed LLM or persistence step can resume without repeating OCR.
 
 `GET /admin/product-candidates` lists pending codes, `GET /admin/products` lists canonical codes, and `POST /admin/product-candidates/{candidate_id}/resolve` accepts a code, edits it into a canonical code, or maps it to an existing product. Resolving a code updates its receipt items and completes receipts with no remaining pending codes. These endpoints are not authenticated; restrict network access accordingly.
 

@@ -270,6 +270,100 @@ def test_receipt_details_include_header_and_ordered_product_lines(receipt_client
     assert body["items"][1]["needs_product_review"] is True
 
 
+def test_failed_receipt_reprocessing_resets_job_and_keeps_saved_ocr(receipt_client):
+    client, engine, owner, _ = receipt_client
+    receipt_id = uuid.uuid4()
+    ocr_key = f"receipts/{receipt_id}/ocr.md"
+    with Session(engine) as session:
+        session.add_all(
+            (
+                Receipt(
+                    id=receipt_id,
+                    uploaded_by_id=owner.id,
+                    retailer_id=1,
+                    original_filename="failed.pdf",
+                    storage_key=f"receipts/{receipt_id}/original.pdf",
+                    status="failed",
+                ),
+                ReceiptJob(
+                    receipt_id=receipt_id,
+                    status="failed",
+                    stage="llm",
+                    attempts=5,
+                    last_error="LLM output failed receipt validation",
+                    ocr_storage_key=ocr_key,
+                ),
+            )
+        )
+        session.commit()
+
+    response = client.post(
+        f"/receipts/{receipt_id}/reprocess",
+        headers={"origin": "https://receipts.example.test"},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "id": str(receipt_id),
+        "status": "queued",
+        "stage": "llm",
+    }
+    with Session(engine) as session:
+        receipt = session.get(Receipt, receipt_id)
+        job = session.scalar(
+            select(ReceiptJob).where(ReceiptJob.receipt_id == receipt_id)
+        )
+        assert receipt is not None
+        assert receipt.status == "queued"
+        assert job is not None
+        assert job.status == "pending"
+        assert job.attempts == 0
+        assert job.stage == "llm"
+        assert job.locked_until is None
+        assert job.last_error is None
+        assert job.ocr_storage_key == ocr_key
+
+
+def test_receipt_reprocessing_rejects_nonfailed_job(receipt_client):
+    client, engine, owner, _ = receipt_client
+    receipt_id = uuid.uuid4()
+    with Session(engine) as session:
+        session.add_all(
+            (
+                Receipt(
+                    id=receipt_id,
+                    uploaded_by_id=owner.id,
+                    retailer_id=1,
+                    original_filename="queued.pdf",
+                    storage_key=f"receipts/{receipt_id}/original.pdf",
+                    status="queued",
+                ),
+                ReceiptJob(
+                    receipt_id=receipt_id,
+                    status="pending",
+                ),
+            )
+        )
+        session.commit()
+
+    response = client.post(
+        f"/receipts/{receipt_id}/reprocess",
+        headers={"origin": "https://receipts.example.test"},
+    )
+
+    assert response.status_code == 409
+    with Session(engine) as session:
+        receipt = session.get(Receipt, receipt_id)
+        job = session.scalar(
+            select(ReceiptJob).where(ReceiptJob.receipt_id == receipt_id)
+        )
+        assert receipt is not None
+        assert receipt.status == "queued"
+        assert job is not None
+        assert job.status == "pending"
+        assert job.attempts == 0
+
+
 def test_analytics_include_all_owners_and_only_completed_receipts(receipt_client):
     client, engine, owner, other_user = receipt_client
     purchased_at = datetime.now(timezone.utc)

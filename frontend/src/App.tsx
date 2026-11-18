@@ -8,6 +8,7 @@ import {
   type CanonicalProduct,
   type ProductCodeCandidate,
   type ReceiptDetail,
+  type ReceiptReprocessResult,
   type ReceiptSummary,
 } from "./api";
 import {
@@ -24,6 +25,7 @@ import {
   PackageCheck,
   Plus,
   ReceiptText,
+  RotateCcw,
   Search,
   Settings2,
   ShieldCheck,
@@ -626,6 +628,8 @@ function ReceiptDetails({ receiptId, onBack }: ReceiptDetailsProps) {
   const [receipt, setReceipt] = useState<ReceiptDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isReprocessing, setIsReprocessing] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -664,11 +668,30 @@ function ReceiptDetails({ receiptId, onBack }: ReceiptDetailsProps) {
         window.clearTimeout(timeoutId);
       }
     };
-  }, [receiptId]);
+  }, [receiptId, reloadKey]);
 
   const formatMoney = (value: string | null) => (
     value === null || !receipt ? "—" : `${value} ${receipt.currency}`
   );
+
+  async function reprocessReceipt() {
+    setIsReprocessing(true);
+    setError(null);
+    try {
+      await apiRequest<ReceiptReprocessResult>(`/receipts/${receiptId}/reprocess`, {
+        method: "POST",
+      });
+      setReloadKey((current) => current + 1);
+    } catch (reprocessError) {
+      setError(
+        reprocessError instanceof Error
+          ? reprocessError.message
+          : "Could not reprocess this receipt.",
+      );
+    } finally {
+      setIsReprocessing(false);
+    }
+  }
 
   return (
     <>
@@ -693,9 +716,22 @@ function ReceiptDetails({ receiptId, onBack }: ReceiptDetailsProps) {
                   : ""}
               </p>
             </div>
-            <span className={`receipt-status ${receipt.status}`}>
-              {receipt.status.replace("_", " ")}
-            </span>
+            <div className="receipt-detail-heading-actions">
+              <span className={`receipt-status ${receipt.status}`}>
+                {receipt.status.replace("_", " ")}
+              </span>
+              {receipt.status === "failed" && (
+                <button
+                  className="receipt-reprocess-button"
+                  type="button"
+                  onClick={reprocessReceipt}
+                  disabled={isReprocessing}
+                >
+                  <RotateCcw size={14} />
+                  {isReprocessing ? "Queueing…" : "Reprocess"}
+                </button>
+              )}
+            </div>
           </div>
 
           {receipt.error && (
