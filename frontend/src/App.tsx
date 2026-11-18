@@ -33,16 +33,46 @@ import {
   Upload,
 } from "lucide-react";
 
-type View = "receipts" | "receipt-detail" | "products" | "insights";
+type AppRoute =
+  | { view: "receipts" | "products" | "insights" }
+  | { view: "receipt-detail"; receiptId: string };
 type ApiStatus = "checking" | "available" | "unavailable";
 
+function routeFromPath(pathname: string): AppRoute | null {
+  const path = pathname.replace(/\/+$/, "") || "/";
+  if (path === "/" || path === "/receipts") {
+    return { view: "receipts" };
+  }
+  if (path === "/products") {
+    return { view: "products" };
+  }
+  if (path === "/insights") {
+    return { view: "insights" };
+  }
+  const receiptMatch = /^\/receipts\/([0-9a-f-]{36})$/i.exec(path);
+  if (receiptMatch) {
+    return { view: "receipt-detail", receiptId: receiptMatch[1] };
+  }
+  return null;
+}
+
+function pathForRoute(route: AppRoute): string {
+  if (route.view === "receipt-detail") {
+    return `/receipts/${encodeURIComponent(route.receiptId)}`;
+  }
+  return `/${route.view}`;
+}
+
 function App() {
-  const [view, setView] = useState<View>("receipts");
+  const [route, setRoute] = useState<AppRoute>(
+    () => routeFromPath(window.location.pathname) ?? { view: "receipts" },
+  );
+  const view = route.view;
+  const selectedReceiptId = route.view === "receipt-detail" ? route.receiptId : null;
   const [apiStatus, setApiStatus] = useState<ApiStatus>("checking");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [receipts, setReceipts] = useState<ReceiptSummary[]>([]);
-  const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
   const [receiptError, setReceiptError] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<ProductCodeCandidate[]>([]);
   const [products, setProducts] = useState<CanonicalProduct[]>([]);
@@ -58,6 +88,34 @@ function App() {
   const [search, setSearch] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const hasLoadedReceipts = useRef(false);
+
+  function navigate(nextRoute: AppRoute) {
+    const nextPath = pathForRoute(nextRoute);
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState(null, "", nextPath);
+    }
+    setRoute(nextRoute);
+  }
+
+  useEffect(() => {
+    const syncRoute = () => {
+      const nextRoute = routeFromPath(window.location.pathname);
+      if (!nextRoute) {
+        window.history.replaceState(null, "", "/receipts");
+        setRoute({ view: "receipts" });
+        return;
+      }
+      const canonicalPath = pathForRoute(nextRoute);
+      if (window.location.pathname !== canonicalPath) {
+        window.history.replaceState(null, "", canonicalPath);
+      }
+      setRoute(nextRoute);
+    };
+
+    syncRoute();
+    window.addEventListener("popstate", syncRoute);
+    return () => window.removeEventListener("popstate", syncRoute);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -278,7 +336,15 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <a className="brand" href="#" aria-label="Receipt Tracker home">
+        <a
+          className="brand"
+          href="/receipts"
+          aria-label="Receipt Tracker home"
+          onClick={(event) => {
+            event.preventDefault();
+            navigate({ view: "receipts" });
+          }}
+        >
           <span className="brand-mark"><ReceiptText size={20} /></span>
           <span>receipt<span className="brand-light">track</span></span>
         </a>
@@ -295,10 +361,7 @@ function App() {
           <button
             type="button"
             className={`nav-item ${view === "receipts" || isReceiptDetails ? "active" : ""}`}
-            onClick={() => {
-              setSelectedReceiptId(null);
-              setView("receipts");
-            }}
+            onClick={() => navigate({ view: "receipts" })}
           >
             <ReceiptText size={18} />
             <span>Receipts</span>
@@ -307,7 +370,7 @@ function App() {
           <button
             type="button"
             className={`nav-item ${isProducts ? "active" : ""}`}
-            onClick={() => setView("products")}
+            onClick={() => navigate({ view: "products" })}
           >
             <PackageCheck size={18} />
             <span>Product review</span>
@@ -316,7 +379,7 @@ function App() {
           <button
             type="button"
             className={`nav-item ${isInsights ? "active" : ""}`}
-            onClick={() => setView("insights")}
+            onClick={() => navigate({ view: "insights" })}
           >
             <LayoutDashboard size={18} />
             <span>Insights</span>
@@ -328,7 +391,7 @@ function App() {
             <span className="tip-icon"><Sparkles size={16} /></span>
             <strong>Good to know</strong>
             <p>Product codes are reviewed once, then matched automatically next time.</p>
-            <button type="button" onClick={() => setView("products")}>
+            <button type="button" onClick={() => navigate({ view: "products" })}>
               How review works <ArrowRight size={14} />
             </button>
           </div>
@@ -368,10 +431,7 @@ function App() {
           {isReceiptDetails && selectedReceiptId ? (
             <ReceiptDetails
               receiptId={selectedReceiptId}
-              onBack={() => {
-                setSelectedReceiptId(null);
-                setView("receipts");
-              }}
+              onBack={() => navigate({ view: "receipts" })}
             />
           ) : isProducts ? (
             <ProductReview
@@ -383,14 +443,14 @@ function App() {
               isLoading={isLoadingCandidates}
               resolvingCandidateId={resolvingCandidateId}
               onResolve={resolveCandidate}
-              onAddReceipt={() => setView("receipts")}
+              onAddReceipt={() => navigate({ view: "receipts" })}
             />
           ) : isInsights ? (
             <Insights
               analytics={analytics}
               error={analyticsError}
               isLoading={isLoadingAnalytics}
-              onAddReceipt={() => setView("receipts")}
+              onAddReceipt={() => navigate({ view: "receipts" })}
             />
           ) : (
             <Receipts
@@ -415,8 +475,7 @@ function App() {
               receiptError={receiptError}
               apiStatus={apiStatus}
               onSelectReceipt={(receiptId) => {
-                setSelectedReceiptId(receiptId);
-                setView("receipt-detail");
+                navigate({ view: "receipt-detail", receiptId });
               }}
             />
           )}
