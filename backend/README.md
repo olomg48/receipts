@@ -5,6 +5,7 @@ The API is a Python 3.12 FastAPI service. Its container exposes:
 - `GET /health/live` for Kubernetes liveness probes.
 - `GET /health/ready` for readiness probes; this checks PostgreSQL and the configured Garage bucket.
 - `POST /receipts` and `GET /receipts` for receipt upload and history.
+- `GET /receipts/{receipt_id}` for receipt details and extracted product lines.
 - `GET /analytics` for spending summaries across the single-owner app.
 - Product review endpoints under `/admin/`.
 - `GET /docs` for the interactive API documentation.

@@ -417,21 +417,68 @@ def _money_text(value: Decimal | int | float | None) -> str:
 def get_receipt(
     receipt_id: uuid.UUID,
     session: Session = Depends(get_db_session),
-) -> dict[str, str | None]:
-    receipt = session.scalar(select(Receipt).where(Receipt.id == receipt_id))
-    if receipt is None:
+) -> dict[str, object]:
+    row = session.execute(
+        select(Receipt, Retailer.code, Retailer.display_name)
+        .join(Retailer, Receipt.retailer_id == Retailer.id)
+        .where(Receipt.id == receipt_id)
+    ).first()
+    if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found")
+    receipt, retailer_code, retailer_name = row
 
     job = session.scalar(
         select(ReceiptJob)
         .where(ReceiptJob.receipt_id == receipt.id)
         .order_by(ReceiptJob.created_at.desc())
     )
+    item_rows = session.execute(
+        select(ReceiptItem, Product.code, ProductCodeCandidate.status)
+        .outerjoin(Product, ReceiptItem.product_id == Product.id)
+        .outerjoin(
+            ProductCodeCandidate,
+            ReceiptItem.product_code_candidate_id == ProductCodeCandidate.id,
+        )
+        .where(ReceiptItem.receipt_id == receipt.id)
+        .order_by(ReceiptItem.line_number)
+    ).all()
     return {
         "id": str(receipt.id),
+        "retailer_code": retailer_code,
+        "retailer_name": retailer_name,
+        "original_filename": receipt.original_filename,
+        "receipt_number": receipt.receipt_number,
+        "purchased_at": receipt.purchased_at.isoformat()
+        if receipt.purchased_at
+        else None,
+        "currency": receipt.currency,
+        "subtotal": _money_text(receipt.subtotal) if receipt.subtotal is not None else None,
+        "discount_total": _money_text(receipt.discount_total),
+        "total_paid": _money_text(receipt.total_paid)
+        if receipt.total_paid is not None
+        else None,
         "status": receipt.status,
+        "created_at": receipt.created_at.isoformat() if receipt.created_at else None,
         "stage": job.stage if job else None,
         "error": job.last_error if job and job.status == "failed" else None,
+        "items": [
+            {
+                "line_number": item.line_number,
+                "product_code": item.raw_product_code,
+                "canonical_product_code": canonical_product_code,
+                "needs_product_review": candidate_status == "pending",
+                "quantity": str(item.quantity),
+                "unit": item.unit,
+                "unit_price": _money_text(item.unit_price)
+                if item.unit_price is not None
+                else None,
+                "line_total": _money_text(item.line_total)
+                if item.line_total is not None
+                else None,
+                "discount_amount": _money_text(item.discount_amount),
+            }
+            for item, canonical_product_code, candidate_status in item_rows
+        ],
     }
 
 

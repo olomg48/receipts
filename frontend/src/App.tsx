@@ -7,9 +7,11 @@ import {
   type CandidateResolutionResult,
   type CanonicalProduct,
   type ProductCodeCandidate,
+  type ReceiptDetail,
   type ReceiptSummary,
 } from "./api";
 import {
+  ArrowLeft,
   ArrowDownToLine,
   ArrowRight,
   Check,
@@ -29,7 +31,7 @@ import {
   Upload,
 } from "lucide-react";
 
-type View = "receipts" | "products" | "insights";
+type View = "receipts" | "receipt-detail" | "products" | "insights";
 type ApiStatus = "checking" | "available" | "unavailable";
 
 function App() {
@@ -38,6 +40,7 @@ function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [receipts, setReceipts] = useState<ReceiptSummary[]>([]);
+  const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
   const [receiptError, setReceiptError] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<ProductCodeCandidate[]>([]);
   const [products, setProducts] = useState<CanonicalProduct[]>([]);
@@ -268,6 +271,7 @@ function App() {
 
   const isProducts = view === "products";
   const isInsights = view === "insights";
+  const isReceiptDetails = view === "receipt-detail";
 
   return (
     <div className="app-shell">
@@ -288,8 +292,11 @@ function App() {
         <nav className="nav-list" aria-label="Main navigation">
           <button
             type="button"
-            className={`nav-item ${view === "receipts" ? "active" : ""}`}
-            onClick={() => setView("receipts")}
+            className={`nav-item ${view === "receipts" || isReceiptDetails ? "active" : ""}`}
+            onClick={() => {
+              setSelectedReceiptId(null);
+              setView("receipts");
+            }}
           >
             <ReceiptText size={18} />
             <span>Receipts</span>
@@ -341,7 +348,9 @@ function App() {
         <header className="topbar">
           <div className="breadcrumbs">
             <span>Workspace</span><span className="crumb-slash">/</span>
-            <strong>{isProducts ? "Product review" : isInsights ? "Insights" : "Receipts"}</strong>
+            <strong>
+              {isProducts ? "Product review" : isInsights ? "Insights" : isReceiptDetails ? "Receipt details" : "Receipts"}
+            </strong>
           </div>
           <div className="topbar-right">
             <div className={`connection-status ${apiStatus}`}>
@@ -354,7 +363,15 @@ function App() {
         </header>
 
         <div className="page-content">
-          {isProducts ? (
+          {isReceiptDetails && selectedReceiptId ? (
+            <ReceiptDetails
+              receiptId={selectedReceiptId}
+              onBack={() => {
+                setSelectedReceiptId(null);
+                setView("receipts");
+              }}
+            />
+          ) : isProducts ? (
             <ProductReview
               search={search}
               setSearch={setSearch}
@@ -395,6 +412,10 @@ function App() {
               isLoadingReceipts={isLoadingReceipts}
               receiptError={receiptError}
               apiStatus={apiStatus}
+              onSelectReceipt={(receiptId) => {
+                setSelectedReceiptId(receiptId);
+                setView("receipt-detail");
+              }}
             />
           )}
         </div>
@@ -417,6 +438,7 @@ type ReceiptsProps = {
   isLoadingReceipts: boolean;
   receiptError: string | null;
   apiStatus: ApiStatus;
+  onSelectReceipt: (receiptId: string) => void;
 };
 
 function Receipts({
@@ -433,6 +455,7 @@ function Receipts({
   isLoadingReceipts,
   receiptError,
   apiStatus,
+  onSelectReceipt,
 }: ReceiptsProps) {
   const totalSpent = receipts.reduce(
     (total, receipt) => total + (receipt.total_paid ? Number(receipt.total_paid) : 0),
@@ -573,6 +596,13 @@ function Receipts({
               <strong className="receipt-row-total">
                 {receipt.total_paid ? `${receipt.total_paid} ${receipt.currency}` : "—"}
               </strong>
+              <button
+                className="receipt-details-button"
+                type="button"
+                onClick={() => onSelectReceipt(receipt.id)}
+              >
+                Details <ArrowRight size={14} />
+              </button>
               {receipt.status === "failed" && receipt.error && (
                 <span className="receipt-error" role="status">
                   {receipt.stage ? `${receipt.stage}: ` : ""}{receipt.error}
@@ -583,6 +613,159 @@ function Receipts({
         </div>
       )}
       <div className="page-footnote">Receipt Tracker <span>·</span> built for clear, simple spending records</div>
+    </>
+  );
+}
+
+type ReceiptDetailsProps = {
+  receiptId: string;
+  onBack: () => void;
+};
+
+function ReceiptDetails({ receiptId, onBack }: ReceiptDetailsProps) {
+  const [receipt, setReceipt] = useState<ReceiptDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    let timeoutId: number | undefined;
+
+    const loadReceipt = async () => {
+      try {
+        const value = await apiRequest<ReceiptDetail>(`/receipts/${receiptId}`);
+        if (!active) {
+          return;
+        }
+        setReceipt(value);
+        setError(null);
+        if (value.status === "queued" || value.status === "processing") {
+          timeoutId = window.setTimeout(loadReceipt, 5000);
+        }
+      } catch (loadError) {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : "Could not load receipt details.");
+        }
+      } finally {
+        if (active) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    setReceipt(null);
+    setError(null);
+    setIsLoading(true);
+    void loadReceipt();
+
+    return () => {
+      active = false;
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [receiptId]);
+
+  const formatMoney = (value: string | null) => (
+    value === null || !receipt ? "—" : `${value} ${receipt.currency}`
+  );
+
+  return (
+    <>
+      <button className="receipt-back-button" type="button" onClick={onBack}>
+        <ArrowLeft size={15} /> All receipts
+      </button>
+      {error && <div className="file-error" role="alert">{error}</div>}
+      {!receipt ? (
+        <div className="empty-table">
+          <strong>{isLoading ? "Loading receipt details…" : "Receipt details unavailable"}</strong>
+        </div>
+      ) : (
+        <>
+          <div className="page-heading receipt-detail-heading">
+            <div>
+              <div className="eyebrow"><span className="eyebrow-mark" /> RECEIPT DETAILS</div>
+              <h1>{receipt.retailer_name}<span> · {receipt.original_filename}</span></h1>
+              <p>
+                {receipt.receipt_number ? `Receipt ${receipt.receipt_number}` : "Receipt number unavailable"}
+                {receipt.purchased_at
+                  ? ` · ${new Date(receipt.purchased_at).toLocaleString()}`
+                  : ""}
+              </p>
+            </div>
+            <span className={`receipt-status ${receipt.status}`}>
+              {receipt.status.replace("_", " ")}
+            </span>
+          </div>
+
+          {receipt.error && (
+            <div className="receipt-detail-error" role="status">
+              {receipt.stage ? `${receipt.stage}: ` : ""}{receipt.error}
+            </div>
+          )}
+          {(receipt.status === "queued" || receipt.status === "processing") && (
+            <div className="receipt-detail-notice">
+              Processing is still in progress. This page will refresh automatically.
+            </div>
+          )}
+
+          <div className="receipt-detail-totals">
+            <div><span>Subtotal</span><strong>{formatMoney(receipt.subtotal)}</strong></div>
+            <div><span>Discounts</span><strong>{formatMoney(receipt.discount_total)}</strong></div>
+            <div><span>Total paid</span><strong>{formatMoney(receipt.total_paid)}</strong></div>
+          </div>
+
+          <div className="section-title-row receipt-items-heading">
+            <div>
+              <h2>Products from this receipt</h2>
+              <p>{receipt.items.length} purchase lines · Values are extracted from the receipt</p>
+            </div>
+          </div>
+          {receipt.items.length === 0 ? (
+            <div className="empty-table">
+              <strong>{receipt.status === "queued" || receipt.status === "processing"
+                ? "Product lines will appear when processing finishes."
+                : "No product lines are available for this receipt."}</strong>
+            </div>
+          ) : (
+            <div className="receipt-items-table-wrap">
+              <table className="receipt-items-table">
+                <thead>
+                  <tr>
+                    <th>Line</th>
+                    <th>Product code</th>
+                    <th>Quantity</th>
+                    <th>Unit price</th>
+                    <th>Discount</th>
+                    <th>Line total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {receipt.items.map((item) => (
+                    <tr key={item.line_number}>
+                      <td>{item.line_number}</td>
+                      <td>
+                        <strong>{item.product_code}</strong>
+                        {item.canonical_product_code && item.canonical_product_code !== item.product_code && (
+                          <small>Matched to {item.canonical_product_code}</small>
+                        )}
+                        {item.needs_product_review && (
+                          <small className="receipt-item-review">Needs product-code review</small>
+                        )}
+                      </td>
+                      <td>{item.quantity}{item.unit ? ` ${item.unit}` : ""}</td>
+                      <td>{formatMoney(item.unit_price)}</td>
+                      <td>{formatMoney(item.discount_amount)}</td>
+                      <td>{formatMoney(item.line_total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="page-footnote">Receipt Tracker <span>·</span> extracted purchase details</div>
+        </>
+      )}
     </>
   );
 }

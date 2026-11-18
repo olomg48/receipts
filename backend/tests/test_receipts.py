@@ -183,6 +183,93 @@ def test_receipt_history_includes_failure_reason(receipt_client):
     assert response.json()[0]["error"] == "OCR provider could not be reached"
 
 
+def test_receipt_details_include_header_and_ordered_product_lines(receipt_client):
+    client, engine, owner, _ = receipt_client
+    receipt_id = uuid.uuid4()
+    purchased_at = datetime(2026, 11, 18, 12, 30, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        receipt = Receipt(
+            id=receipt_id,
+            uploaded_by_id=owner.id,
+            retailer_id=1,
+            original_filename="receipt.pdf",
+            storage_key="receipts/details/original.pdf",
+            receipt_number="R-123",
+            purchased_at=purchased_at,
+            currency="PLN",
+            subtotal=Decimal("12.50"),
+            discount_total=Decimal("1.25"),
+            total_paid=Decimal("11.25"),
+            status="needs_review",
+        )
+        product = Product(code="Milk-1L", normalized_code="milk-1l")
+        candidate = ProductCodeCandidate(
+            observed_code="Unknown-1",
+            normalized_code="unknown-1",
+            status="pending",
+        )
+        session.add_all((receipt, product, candidate))
+        session.flush()
+        session.add_all(
+            (
+                ReceiptItem(
+                    receipt_id=receipt_id,
+                    line_number=2,
+                    raw_product_code="Unknown-1",
+                    product_code_candidate_id=candidate.id,
+                    quantity=Decimal("1"),
+                    unit="pcs",
+                    line_total=Decimal("4.00"),
+                    discount_amount=Decimal("0"),
+                ),
+                ReceiptItem(
+                    receipt_id=receipt_id,
+                    line_number=1,
+                    raw_product_code="Milk1L",
+                    product_id=product.id,
+                    quantity=Decimal("2"),
+                    unit="pcs",
+                    unit_price=Decimal("6.25"),
+                    line_total=Decimal("12.50"),
+                    discount_amount=Decimal("1.25"),
+                ),
+            )
+        )
+        session.add(
+            ReceiptJob(
+                receipt_id=receipt_id,
+                status="done",
+                stage="complete",
+            )
+        )
+        session.commit()
+
+    response = client.get(f"/receipts/{receipt_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["retailer_name"] == "Biedronka"
+    assert body["receipt_number"] == "R-123"
+    assert body["subtotal"] == "12.50"
+    assert body["discount_total"] == "1.25"
+    assert body["total_paid"] == "11.25"
+    assert [item["line_number"] for item in body["items"]] == [1, 2]
+    assert body["items"][0] == {
+        "line_number": 1,
+        "product_code": "Milk1L",
+        "canonical_product_code": "Milk-1L",
+        "needs_product_review": False,
+        "quantity": "2.000",
+        "unit": "pcs",
+        "unit_price": "6.25",
+        "line_total": "12.50",
+        "discount_amount": "1.25",
+    }
+    assert body["items"][1]["product_code"] == "Unknown-1"
+    assert body["items"][1]["canonical_product_code"] is None
+    assert body["items"][1]["needs_product_review"] is True
+
+
 def test_analytics_include_all_owners_and_only_completed_receipts(receipt_client):
     client, engine, owner, other_user = receipt_client
     purchased_at = datetime.now(timezone.utc)

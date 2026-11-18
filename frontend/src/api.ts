@@ -14,6 +14,23 @@ export type ReceiptSummary = {
   error: string | null;
 };
 
+export type ReceiptLineItem = {
+  line_number: number;
+  product_code: string;
+  canonical_product_code: string | null;
+  needs_product_review: boolean;
+  quantity: string;
+  unit: string | null;
+  unit_price: string | null;
+  line_total: string | null;
+  discount_amount: string;
+};
+
+export type ReceiptDetail = ReceiptSummary & {
+  subtotal: string | null;
+  items: ReceiptLineItem[];
+};
+
 export type AnalyticsCurrencyTotal = {
   currency: string;
   receipt_count: number;
