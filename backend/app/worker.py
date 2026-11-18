@@ -93,11 +93,19 @@ def _run_ocr(data: bytes, extension: str) -> str:
         raise ProcessingError("ocr", "OCR provider could not be reached") from None
 
     try:
-        pages = response.json()["pages"]
-        markdown = "\n\n".join(
-            page["markdown"] for page in pages if isinstance(page.get("markdown"), str)
-        )
-    except (KeyError, TypeError, ValueError):
+        result = response.json()
+        pages = result.get("pages") if isinstance(result, dict) else None
+        if not isinstance(pages, list) or not all(isinstance(page, dict) for page in pages):
+            raise ValueError
+        markdown_parts = []
+        for page in pages:
+            page_markdown = page.get("markdown")
+            if page_markdown is not None and not isinstance(page_markdown, str):
+                raise ValueError
+            if isinstance(page_markdown, str):
+                markdown_parts.append(page_markdown)
+        markdown = "\n\n".join(markdown_parts)
+    except (TypeError, ValueError):
         raise ProcessingError("ocr", "OCR provider returned an invalid response") from None
     if not markdown.strip():
         raise ProcessingError("ocr", "OCR returned no receipt text")
@@ -392,8 +400,13 @@ def process_next_job() -> bool:
             extraction_key = job.extraction_storage_key if job else None
 
         if stage == "persist" and extraction_key:
-            raw_json = get_object(extraction_key).decode("utf-8")
-            extracted = ExtractedReceipt.model_validate_json(raw_json)
+            try:
+                raw_json = get_object(extraction_key).decode("utf-8")
+                extracted = ExtractedReceipt.model_validate_json(raw_json)
+            except (UnicodeDecodeError, ValidationError):
+                raise ProcessingError(
+                    "persist", "Stored extraction result is invalid"
+                ) from None
         else:
             if not markdown_key:
                 original = get_object(source_key)
